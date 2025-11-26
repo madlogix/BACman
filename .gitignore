@@ -1,0 +1,37 @@
+# Build artifacts
+target/
+*.o
+*.a
+*.so
+*.dylib
+
+# Rust
+Cargo.lock
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# PDFs and large files
+*.pdf
+*.pdf:Zone.Identifier
+
+# Reference repos (cloned for documentation)
+M5Unified/
+
+# OS files
+.DS_Store
+Thumbs.db
+*:Zone.Identifier
+
+# ESP-IDF build and toolchain
+build/
+sdkconfig
+sdkconfig.old
+.embuild/
+
+# Logs
+*.log

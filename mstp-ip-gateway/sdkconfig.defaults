@@ -1,0 +1,33 @@
+# Rust often needs a bit of an extra main task stack size compared to C (the default is 3K)
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8000
+
+# Use this to set FreeRTOS kernel tick frequency to 1000 Hz (100 Hz by default).
+# This allows to have higher resolution delay/sleep times.
+CONFIG_FREERTOS_HZ=1000
+
+# WiFi configuration
+CONFIG_ESP_WIFI_ENABLED=y
+CONFIG_ESP_WIFI_STA_DISCONNECTED_PM_ENABLE=n
+
+# Enable PSRAM for M5StickC Plus2
+CONFIG_ESP32_SPIRAM_SUPPORT=y
+CONFIG_SPIRAM_USE_MALLOC=y
+
+# Increase socket buffer sizes for BACnet/IP
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=5744
+CONFIG_LWIP_TCP_WND_DEFAULT=5744
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=12
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=12
+
+# UART configuration for MS/TP
+CONFIG_UART_ISR_IN_IRAM=y
+
+# Use default partition table - single factory app
+# The default partition supports up to ~1.5MB app which is sufficient for our firmware
+CONFIG_PARTITION_TABLE_SINGLE_APP=y
+
+# Logging
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# Flash size for M5StickC Plus2 (8MB)
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
