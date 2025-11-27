@@ -21,7 +21,7 @@ use esp_idf_svc::{
         task::watchdog::{TWDTConfig, TWDTDriver},
     },
     nvs::EspDefaultNvsPartition,
-    wifi::{AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi},
+    wifi::{AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi, AccessPointConfiguration},
 };
 use log::{error, info, warn};
 use std::net::UdpSocket;
@@ -47,11 +47,23 @@ use web::{WebState, start_web_server};
 /// Global flag for WiFi connection status (used by reconnection logic)
 static WIFI_CONNECTED: AtomicBool = AtomicBool::new(false);
 
+/// Global flag for AP mode status
+static AP_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 /// WiFi reconnection interval in seconds
 const WIFI_RECONNECT_INTERVAL_SECS: u64 = 10;
 
 /// Watchdog timeout in seconds
 const WATCHDOG_TIMEOUT_SECS: u64 = 30;
+
+/// Router announcement interval in loop iterations (30 seconds = 3000 iterations at 10ms)
+const ROUTER_ANNOUNCE_INTERVAL: u64 = 3000;
+
+/// Long-press threshold in loop iterations (1 second = 10 iterations at 100ms)
+const LONG_PRESS_THRESHOLD: u32 = 10;
+
+/// Default AP mode IP address
+const AP_IP_ADDRESS: &str = "192.168.4.1";
 
 fn main() -> anyhow::Result<()> {
     // Initialize ESP-IDF
@@ -214,10 +226,18 @@ fn main() -> anyhow::Result<()> {
     socket.set_read_timeout(Some(Duration::from_millis(100)))?;
     info!("BACnet/IP socket bound to {}", bind_addr);
 
-    // Create gateway
+    // Create gateway - use local IP and subnet mask for routing
+    let local_ip: std::net::Ipv4Addr = ip_info.ip.octets().into();
+    // Convert CIDR prefix to subnet mask (e.g., 24 -> 255.255.255.0)
+    let prefix: u8 = ip_info.subnet.mask.0;
+    let mask_bits: u32 = if prefix == 0 { 0 } else { !0u32 << (32 - prefix) };
+    let subnet_mask: std::net::Ipv4Addr = mask_bits.to_be_bytes().into();
     let gateway = Arc::new(Mutex::new(BacnetGateway::new(
         config.mstp_network,
         config.ip_network,
+        local_ip,
+        config.bacnet_ip_port,
+        subnet_mask,
     )));
 
     // Create local BACnet device for gateway discoverability
@@ -235,33 +255,57 @@ fn main() -> anyhow::Result<()> {
     // (try_clone() doesn't work on ESP-IDF)
     let socket = Arc::new(socket);
 
+    // Set the IP socket on the gateway so it can send MS/TP->IP traffic
+    // This is critical - without this, all MS/TP to IP packets are queued but never sent!
+    if let Ok(mut gw) = gateway.lock() {
+        gw.set_ip_socket(Arc::clone(&socket));
+        info!("IP socket set on gateway for MS/TP->IP routing");
+    }
+
     // Create web server state early so it can be shared with receive tasks
     let web_state = Arc::new(Mutex::new(WebState::new(config.clone(), Some(nvs_for_console))));
 
     // Spawn MS/TP receive thread
+    info!(">>> [MAIN] About to spawn MS/TP receive thread...");
     let mstp_driver_clone = Arc::clone(&mstp_driver);
     let gateway_clone = Arc::clone(&gateway);
     let local_device_clone = Arc::clone(&local_device);
     let web_state_mstp = Arc::clone(&web_state);
+    // Stack size increased from 8KB to 16KB to handle BACnet protocol processing
+    // which may require significant stack space for NPDU parsing, routing tables,
+    // and complex service handling (ASHRAE 135-2024)
     let _mstp_thread = thread::Builder::new()
-        .stack_size(8192)
+        .stack_size(16384)
         .spawn(move || {
             mstp_receive_task(mstp_driver_clone, gateway_clone, local_device_clone, web_state_mstp);
         })?;
+    info!(">>> [MAIN] MS/TP thread spawned successfully!");
 
     // Spawn BACnet/IP receive thread
     let socket_clone = Arc::clone(&socket);
     let gateway_clone = Arc::clone(&gateway);
     let mstp_driver_clone = Arc::clone(&mstp_driver);
     let local_device_clone = Arc::clone(&local_device);
-    let _ip_thread = thread::Builder::new()
+    // Stack size reduced from 16KB to 8KB to conserve memory for main loop
+    info!(">>> [MAIN] About to spawn IP receive thread...");
+    match thread::Builder::new()
         .stack_size(8192)
         .spawn(move || {
             ip_receive_task(socket_clone, gateway_clone, mstp_driver_clone, local_device_clone);
-        })?;
+        }) {
+        Ok(_thread) => {
+            info!(">>> [MAIN] IP thread spawned successfully!");
+        }
+        Err(e) => {
+            error!(">>> [MAIN] FAILED to spawn IP thread: {:?}", e);
+            error!(">>> [MAIN] Continuing without IP receive thread - MS/TP only mode");
+        }
+    }
 
-    info!("Gateway running!");
+    info!(">>> [MAIN] Gateway running!");
+    info!(">>> [MAIN] DEBUG: Line 306 - about to print network numbers");
     info!("  MS/TP Network {} <-> IP Network {}", config.mstp_network, config.ip_network);
+    info!(">>> [MAIN] DEBUG: Line 308 - about to create GatewayStatus");
 
     // Status tracking for display
     let mut status = GatewayStatus {
@@ -280,11 +324,18 @@ fn main() -> anyhow::Result<()> {
         mstp_baud_rate: config.mstp_baud_rate,
         mstp_state: "Initialize".to_string(),
         has_token: false,
+        // AP mode fields
+        ap_mode_active: false,
+        ap_ssid: config.ap_ssid.clone(),
+        ap_ip: AP_IP_ADDRESS.to_string(),
+        ap_clients: 0,
     };
+    info!(">>> [MAIN] DEBUG: GatewayStatus created successfully");
 
     // Display screen cycling with Button A
     let mut current_screen = DisplayScreen::Status;
     let mut btn_a_was_pressed = false;
+    let mut btn_a_press_count: u32 = 0;  // Track how long button A is held
     let mut btn_b_was_pressed = false;
     let mut btn_c_was_pressed = false;
 
@@ -292,37 +343,166 @@ fn main() -> anyhow::Result<()> {
     let mut wifi_check_counter: u32 = 0;
     const WIFI_CHECK_INTERVAL: u32 = 50; // Check every 5 seconds (50 * 100ms)
 
+    // Router announcement tracking (I-Am and I-Am-Router-To-Network)
+    // Start at max to trigger immediate announcement on first loop
+    let mut router_announce_counter: u64 = ROUTER_ANNOUNCE_INTERVAL;
+
     info!("╔══════════════════════════════════════════════════════════════╗");
     info!("║                    Gateway Running!                          ║");
     info!("╚══════════════════════════════════════════════════════════════╝");
 
+    info!(">>> [MAIN] About to update web_state...");
     // Update initial web state (web_state was created earlier for thread sharing)
     {
         let mut state = web_state.lock().unwrap();
         state.wifi_connected = true;
         state.ip_address = ip_info.ip.to_string();
     }
+    info!(">>> [MAIN] web_state updated");
 
     // Start web server for configuration portal
+    info!(">>> [MAIN] About to start web server...");
     let web_state_clone = Arc::clone(&web_state);
     let _web_server = match start_web_server(web_state_clone) {
         Ok(server) => {
-            info!("Web portal available at http://{}/", ip_info.ip);
+            info!(">>> [MAIN] Web server started! Portal at http://{}/", ip_info.ip);
             Some(server)
         }
         Err(e) => {
-            error!("Failed to start web server: {}", e);
+            error!(">>> [MAIN] Failed to start web server: {}", e);
             None
         }
     };
+    info!(">>> [MAIN] Web server setup complete, about to enter main loop...");
 
+    let mut loop_count: u64 = 0;
+    info!(">>> [MAIN] ENTERING MAIN LOOP <<<");
     loop {
-        // Feed the watchdog to prevent reset
-        watchdog.feed()?;
+        loop_count += 1;
+
+        // Log first iteration and then every 1000 iterations (~10 seconds at 10ms sleep)
+        if loop_count == 1 || loop_count % 1000 == 0 {
+            info!(">>> Main loop iteration {} <<<", loop_count);
+        }
+
+        // Feed the watchdog to prevent reset - don't use ? to avoid silent exit
+        if let Err(e) = watchdog.feed() {
+            warn!("Watchdog feed error (continuing anyway): {:?}", e);
+        }
 
         // Process any pending gateway tasks
         if let Ok(mut gw) = gateway.lock() {
             gw.process_housekeeping();
+        }
+
+        // Check if Who-Is scan was requested from web portal FIRST (before locking driver)
+        // This ensures scan requests are processed even if driver lock is contended
+        let scan_requested = {
+            match web_state.lock() {
+                Ok(mut web) => {
+                    if web.scan_requested {
+                        info!("Main loop: scan_requested=true, processing...");
+                        web.scan_requested = false;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Err(e) => {
+                    warn!("Main loop: Failed to lock web_state: {}", e);
+                    false
+                }
+            }
+        };
+
+        // Process scan request with driver lock
+        if scan_requested {
+            info!("Who-Is scan requested - sending broadcasts");
+
+            // Build Who-Is APDU
+            let who_is_apdu = LocalDevice::build_who_is();
+            info!("Who-Is APDU: {:02X?}", who_is_apdu);
+
+            // Send LOCAL broadcast first (simple NPDU, no network layer)
+            // This reaches devices on the local MS/TP segment
+            let mut local_npdu = Vec::with_capacity(who_is_apdu.len() + 2);
+            local_npdu.push(0x01); // NPDU version
+            local_npdu.push(0x00); // Control: no network layer info
+            local_npdu.extend_from_slice(&who_is_apdu);
+            info!("Who-Is NPDU (local): {:02X?}", local_npdu);
+
+            // Also send GLOBAL broadcast (DNET=0xFFFF) for routers
+            // Per Clause 6.2.2, when DNET is present we must include SNET/SADR so routers
+            // know where to return replies. We include our configured MS/TP network and MAC.
+            let mut global_npdu = Vec::with_capacity(who_is_apdu.len() + 12);
+            global_npdu.push(0x01); // NPDU version
+            // Control: destination present + source present (required when DNET is present)
+            global_npdu.push(0x28);
+            global_npdu.push(0xFF); // DNET high byte (0xFFFF = global broadcast)
+            global_npdu.push(0xFF); // DNET low byte
+            global_npdu.push(0x00); // DLEN = 0 (broadcast)
+            // Source specifier (SNET/SADR) so I-Am can be routed back
+            global_npdu.push((config.mstp_network >> 8) as u8); // SNET high
+            global_npdu.push((config.mstp_network & 0xFF) as u8); // SNET low
+            global_npdu.push(0x01); // SLEN = 1 (our MS/TP MAC length)
+            global_npdu.push(config.mstp_address); // SADR = our MAC
+            global_npdu.push(0xFF); // Hop count
+            global_npdu.extend_from_slice(&who_is_apdu);
+            info!("Who-Is NPDU (global): {:02X?}", global_npdu);
+
+            // Now lock driver and queue frames
+            if let Ok(mut driver) = mstp_driver.lock() {
+                match driver.send_frame(&local_npdu, 0xFF, false) {
+                    Ok(_) => info!("Local Who-Is broadcast queued"),
+                    Err(e) => warn!("Failed to queue local Who-Is: {}", e),
+                }
+                match driver.send_frame(&global_npdu, 0xFF, false) {
+                    Ok(_) => info!("Global Who-Is broadcast queued"),
+                    Err(e) => warn!("Failed to queue global Who-Is: {}", e),
+                }
+            } else {
+                warn!("Could not lock MS/TP driver to send Who-Is");
+            }
+        }
+
+        // Periodic router announcements (I-Am and I-Am-Router-To-Network)
+        // This announces the router's presence on the MS/TP network so devices know we exist
+        router_announce_counter += 1;
+        // Debug: log every 1000 iterations to verify counter is incrementing
+        if router_announce_counter % 1000 == 0 {
+            info!("Announcement counter: {} (threshold: {})", router_announce_counter, ROUTER_ANNOUNCE_INTERVAL);
+        }
+        if router_announce_counter >= ROUTER_ANNOUNCE_INTERVAL {
+            router_announce_counter = 0;
+
+            info!("Sending periodic router announcements...");
+
+            // Build I-Am APDU for the gateway device
+            let iam_apdu = local_device.build_i_am();
+
+            // Wrap I-Am in NPDU (local broadcast, no network layer info)
+            let mut iam_npdu = Vec::with_capacity(iam_apdu.len() + 2);
+            iam_npdu.push(0x01); // NPDU version
+            iam_npdu.push(0x00); // Control: no network layer info
+            iam_npdu.extend_from_slice(&iam_apdu);
+
+            // Build I-Am-Router-To-Network announcing the IP network
+            // This tells MS/TP devices that we can route to the IP network
+            let iartn_npdu = LocalDevice::build_i_am_router_to_network(&[config.ip_network]);
+
+            // Queue both announcements
+            if let Ok(mut driver) = mstp_driver.lock() {
+                match driver.send_frame(&iam_npdu, 0xFF, false) {
+                    Ok(_) => info!("I-Am broadcast queued"),
+                    Err(e) => warn!("Failed to queue I-Am: {}", e),
+                }
+                match driver.send_frame(&iartn_npdu, 0xFF, false) {
+                    Ok(_) => info!("I-Am-Router-To-Network broadcast queued (announcing network {})", config.ip_network),
+                    Err(e) => warn!("Failed to queue I-Am-Router-To-Network: {}", e),
+                }
+            } else {
+                warn!("Could not lock MS/TP driver for router announcements");
+            }
         }
 
         // Get MS/TP driver stats
@@ -346,32 +526,6 @@ fn main() -> anyhow::Result<()> {
                     driver.reset_stats();
                     web.reset_stats_requested = false;
                     info!("Statistics reset completed");
-                }
-
-                // Check if Who-Is scan was requested from web portal
-                if web.scan_requested {
-                    web.scan_requested = false;
-                    info!("Who-Is scan requested - sending broadcast");
-
-                    // Build Who-Is APDU
-                    let who_is_apdu = LocalDevice::build_who_is();
-
-                    // Wrap in NPDU for LOCAL broadcast (no network layer addressing)
-                    // For local MS/TP broadcast, we use simple NPDU without DNET
-                    // Control byte 0x00 = no destination network, no source network, APDU follows
-                    let mut npdu = Vec::with_capacity(who_is_apdu.len() + 2);
-                    npdu.push(0x01); // NPDU version
-                    npdu.push(0x00); // Control: no network layer info, expecting reply
-                    npdu.extend_from_slice(&who_is_apdu);
-
-                    // Send as broadcast via MS/TP (destination MAC = 0xFF for broadcast)
-                    if let Err(e) = driver.send_frame(&npdu, 0xFF, false) {
-                        warn!("Failed to send Who-Is broadcast: {}", e);
-                    } else {
-                        info!("Who-Is broadcast sent ({} bytes)", npdu.len());
-                    }
-
-                    // Set a timeout for scan to complete (handled by JavaScript)
                 }
             }
         }
@@ -406,16 +560,75 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        // Handle button A (front big button) - cycle through screens
+        // Handle button A (front big button)
+        // - Short press: cycle through screens
+        // - Long press (on APConfig screen): toggle AP mode
         let btn_a_pressed = btn_a.is_low();
-        if btn_a_pressed && !btn_a_was_pressed {
-            current_screen = current_screen.next();
-            info!("Button A pressed - screen: {:?}", current_screen);
-            // Force full redraw when switching screens
-            lcd.clear_and_reset().ok();
-            if current_screen == DisplayScreen::Splash {
-                lcd.show_splash_screen().ok();
+        if btn_a_pressed {
+            btn_a_press_count += 1;
+
+            // Check for long press on APConfig screen
+            if btn_a_press_count == LONG_PRESS_THRESHOLD && current_screen == DisplayScreen::APConfig {
+                info!("Long press detected on APConfig screen - toggling AP mode");
+
+                // Toggle AP mode
+                let new_ap_mode = !AP_MODE_ACTIVE.load(Ordering::SeqCst);
+
+                if new_ap_mode {
+                    // Switch to AP mode
+                    info!("Switching to AP mode...");
+                    if let Ok(mut wifi_guard) = wifi.lock() {
+                        match switch_to_ap_mode(&mut wifi_guard, &config.ap_ssid, &config.ap_password) {
+                            Ok(_) => {
+                                AP_MODE_ACTIVE.store(true, Ordering::SeqCst);
+                                WIFI_CONNECTED.store(false, Ordering::SeqCst);
+                                status.ap_mode_active = true;
+                                status.wifi_connected = false;
+                                status.ip_address = AP_IP_ADDRESS.to_string();
+                                info!("AP mode activated: SSID={}", config.ap_ssid);
+                            }
+                            Err(e) => {
+                                error!("Failed to switch to AP mode: {}", e);
+                            }
+                        }
+                    }
+                } else {
+                    // Switch back to Station mode
+                    info!("Switching back to Station mode...");
+                    if let Ok(mut wifi_guard) = wifi.lock() {
+                        match switch_to_sta_mode(&mut wifi_guard, &config.wifi_ssid, &config.wifi_password) {
+                            Ok(ip) => {
+                                AP_MODE_ACTIVE.store(false, Ordering::SeqCst);
+                                WIFI_CONNECTED.store(true, Ordering::SeqCst);
+                                status.ap_mode_active = false;
+                                status.wifi_connected = true;
+                                status.ip_address = ip;
+                                info!("Station mode activated");
+                            }
+                            Err(e) => {
+                                error!("Failed to switch to Station mode: {}", e);
+                                // Stay in AP mode if switching fails
+                            }
+                        }
+                    }
+                }
+
+                // Force display update
+                lcd.clear_and_reset().ok();
             }
+        } else {
+            // Button released
+            if btn_a_was_pressed && btn_a_press_count < LONG_PRESS_THRESHOLD {
+                // Short press - cycle screens
+                current_screen = current_screen.next();
+                info!("Button A short press - screen: {:?}", current_screen);
+                // Force full redraw when switching screens
+                lcd.clear_and_reset().ok();
+                if current_screen == DisplayScreen::Splash {
+                    lcd.show_splash_screen().ok();
+                }
+            }
+            btn_a_press_count = 0;
         }
         btn_a_was_pressed = btn_a_pressed;
 
@@ -451,13 +664,20 @@ fn main() -> anyhow::Result<()> {
                     warn!("Failed to update connection display: {}", e);
                 }
             }
+            DisplayScreen::APConfig => {
+                if let Err(e) = lcd.update_ap_config(&status) {
+                    warn!("Failed to update AP config display: {}", e);
+                }
+            }
             DisplayScreen::Splash => {
                 // Splash screen is static, no updates needed
             }
         }
 
         // Small delay to prevent busy-waiting
-        thread::sleep(Duration::from_millis(100));
+        // Reduced from 100ms to 10ms to be more responsive to scan requests
+        // while still preventing excessive CPU usage
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -557,6 +777,73 @@ fn check_wifi_connection(wifi: &mut BlockingWifi<EspWifi<'static>>) -> bool {
     false
 }
 
+/// Switch WiFi to Access Point mode
+fn switch_to_ap_mode(
+    wifi: &mut BlockingWifi<EspWifi<'static>>,
+    ap_ssid: &str,
+    ap_password: &str,
+) -> anyhow::Result<()> {
+    info!("Configuring WiFi Access Point mode...");
+
+    // Stop current WiFi operation
+    let _ = wifi.disconnect();
+    let _ = wifi.stop();
+
+    // Configure as Access Point
+    let ap_config = AccessPointConfiguration {
+        ssid: ap_ssid.try_into().map_err(|_| anyhow::anyhow!("Invalid AP SSID"))?,
+        ssid_hidden: false,
+        auth_method: AuthMethod::WPA2Personal,
+        password: ap_password.try_into().map_err(|_| anyhow::anyhow!("Invalid AP password"))?,
+        channel: 6,  // Use channel 6 (common, less interference)
+        max_connections: 4,
+        ..Default::default()
+    };
+
+    wifi.set_configuration(&Configuration::AccessPoint(ap_config))?;
+    wifi.start()?;
+
+    info!("WiFi AP started: SSID='{}', IP={}", ap_ssid, AP_IP_ADDRESS);
+    Ok(())
+}
+
+/// Switch WiFi back to Station (client) mode
+fn switch_to_sta_mode(
+    wifi: &mut BlockingWifi<EspWifi<'static>>,
+    ssid: &str,
+    password: &str,
+) -> anyhow::Result<String> {
+    info!("Configuring WiFi Station mode...");
+
+    // Stop current WiFi operation
+    let _ = wifi.stop();
+
+    // Configure as Station (client)
+    let sta_config = ClientConfiguration {
+        ssid: ssid.try_into().map_err(|_| anyhow::anyhow!("Invalid WiFi SSID"))?,
+        bssid: None,
+        auth_method: AuthMethod::WPA2Personal,
+        password: password.try_into().map_err(|_| anyhow::anyhow!("Invalid WiFi password"))?,
+        channel: None,
+        ..Default::default()
+    };
+
+    wifi.set_configuration(&Configuration::Client(sta_config))?;
+    wifi.start()?;
+
+    // Connect to the network
+    info!("Connecting to WiFi network '{}'...", ssid);
+    wifi.connect()?;
+    wifi.wait_netif_up()?;
+
+    // Get assigned IP address
+    let ip_info = wifi.wifi().sta_netif().get_ip_info()?;
+    let ip_str = ip_info.ip.to_string();
+
+    info!("WiFi Station mode connected: IP={}", ip_str);
+    Ok(ip_str)
+}
+
 /// MS/TP receive task - reads frames from RS-485 and routes to IP
 fn mstp_receive_task(
     mstp_driver: Arc<Mutex<MstpDriver<'static>>>,
@@ -584,10 +871,20 @@ fn mstp_receive_task(
 
         match frame {
             Ok(Some((data, source_addr))) => {
+                info!("MS/TP RX queue: {} bytes from MAC {}, NPDU: {:02X?}",
+                       data.len(), source_addr, &data[..data.len().min(30)]);
+
+                // Store frame for debug viewing
+                if let Ok(mut web) = web_state.lock() {
+                    web.add_rx_frame(source_addr, &data);
+                }
+
                 // Check if this is an I-Am response (for device discovery)
                 if let Some(apdu) = extract_apdu_from_npdu(&data) {
+                    info!("  -> APDU extracted: {:02X?}", &apdu[..apdu.len().min(20)]);
                     // Check for I-Am (Unconfirmed Request, Service 0)
                     if apdu.len() >= 2 && apdu[0] == 0x10 && apdu[1] == 0x00 {
+                        info!("  -> I-Am detected from MAC {}", source_addr);
                         if let Some(device) = DiscoveredDevice::from_i_am(apdu, source_addr) {
                             info!("Discovered device: instance {} at MAC {}, vendor {}",
                                 device.device_instance, device.mac_address, device.vendor_id);
@@ -615,6 +912,8 @@ fn mstp_receive_task(
                         // Build NPDU wrapper for the response
                         let (response_npdu, is_broadcast) = response;
                         let dest = if is_broadcast { 0xFF } else { source_addr };
+                        info!("Sending local device response: {} bytes to MAC {} (broadcast={})",
+                              response_npdu.len(), dest, is_broadcast);
                         if let Err(e) = driver.send_frame(&response_npdu, dest, false) {
                             warn!("Failed to send local device response: {}", e);
                         }
@@ -622,8 +921,22 @@ fn mstp_receive_task(
                 } else {
                     // Route the frame through the gateway
                     if let Ok(mut gw) = gateway.lock() {
-                        if let Err(e) = gw.route_from_mstp(&data, source_addr) {
-                            warn!("Failed to route MS/TP frame: {}", e);
+                        match gw.route_from_mstp(&data, source_addr) {
+                            Ok(Some((reject_npdu, reject_dest))) => {
+                                // Send reject message back to MS/TP source
+                                drop(gw); // Release gateway lock before acquiring driver lock
+                                if let Ok(mut driver) = mstp_driver.lock() {
+                                    if let Err(e) = driver.send_frame(&reject_npdu, reject_dest, false) {
+                                        warn!("Failed to send reject to MS/TP: {}", e);
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                // Successfully routed, nothing more to do
+                            }
+                            Err(e) => {
+                                warn!("Failed to route MS/TP frame: {}", e);
+                            }
                         }
                     }
                 }
@@ -809,6 +1122,10 @@ fn ip_receive_task(
             Ok((len, source_addr)) => {
                 let data = &buffer[..len];
 
+                // Log ALL received IP packets for debugging
+                info!("BIP RX: {} bytes from {} BVLC: {:02X?}",
+                      len, source_addr, &data[..data.len().min(20)]);
+
                 // Try to process with local device first (for Who-Is from IP side)
                 if let Some((response_npdu, is_broadcast)) = try_process_ip_local_device(data, &local_device) {
                     // Wrap in BVLC and send back
@@ -825,10 +1142,15 @@ fn ip_receive_task(
 
                     // Send response
                     if is_broadcast {
-                        // Send to broadcast address
+                        // Send to broadcast address for network discovery
                         let broadcast_addr = "255.255.255.255:47808";
                         if let Err(e) = socket.send_to(&bvlc, broadcast_addr) {
                             warn!("Failed to send I-Am broadcast: {}", e);
+                        }
+                        // Also send directly to the requester (common BACnet practice)
+                        // This ensures the requester gets our I-Am even if broadcast fails
+                        if let Err(e) = socket.send_to(&bvlc, source_addr) {
+                            warn!("Failed to send I-Am unicast to {}: {}", source_addr, e);
                         }
                     } else {
                         if let Err(e) = socket.send_to(&bvlc, source_addr) {
@@ -842,15 +1164,18 @@ fn ip_receive_task(
                     match gw.route_from_ip(data, source_addr) {
                         Ok(Some((mstp_data, mstp_dest))) => {
                             // Send to MS/TP
-                            // TODO: Determine if this is an expecting-reply frame from NPDU
+                            info!("IP->MS/TP routing: {} bytes to MS/TP dest={} NPDU: {:02X?}",
+                                  mstp_data.len(), mstp_dest, &mstp_data[..mstp_data.len().min(20)]);
                             if let Ok(mut driver) = mstp_driver.lock() {
-                                if let Err(e) = driver.send_frame(&mstp_data, mstp_dest, false) {
-                                    warn!("Failed to send to MS/TP: {}", e);
+                                match driver.send_frame(&mstp_data, mstp_dest, false) {
+                                    Ok(_) => info!("IP->MS/TP frame queued successfully"),
+                                    Err(e) => warn!("Failed to send to MS/TP: {}", e),
                                 }
                             }
                         }
                         Ok(None) => {
-                            // Frame handled internally (e.g., BVLC control)
+                            // Frame handled internally (e.g., BVLC control) or not for MS/TP
+                            info!("IP frame not routed to MS/TP (handled internally or not for MS/TP network)");
                         }
                         Err(e) => {
                             warn!("Failed to route IP frame: {}", e);

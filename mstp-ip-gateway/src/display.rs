@@ -32,7 +32,7 @@ pub const DISPLAY_HEIGHT: u32 = 135;
 
 /// Number of display screens available
 #[allow(dead_code)]
-pub const NUM_SCREENS: u8 = 3;
+pub const NUM_SCREENS: u8 = 4;
 
 /// Display screen types
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -40,7 +40,8 @@ pub enum DisplayScreen {
     #[default]
     Status = 0,      // Traffic stats, loop time, errors
     Connection = 1,  // WiFi, MSTP status, baud rate, address
-    Splash = 2,      // BACman logo
+    APConfig = 2,    // WiFi AP mode info (long-press A to activate)
+    Splash = 3,      // BACman logo
 }
 
 #[allow(dead_code)]
@@ -49,7 +50,8 @@ impl DisplayScreen {
     pub fn next(self) -> Self {
         match self {
             DisplayScreen::Status => DisplayScreen::Connection,
-            DisplayScreen::Connection => DisplayScreen::Splash,
+            DisplayScreen::Connection => DisplayScreen::APConfig,
+            DisplayScreen::APConfig => DisplayScreen::Splash,
             DisplayScreen::Splash => DisplayScreen::Status,
         }
     }
@@ -59,7 +61,8 @@ impl DisplayScreen {
         match val % NUM_SCREENS {
             0 => DisplayScreen::Status,
             1 => DisplayScreen::Connection,
-            2 => DisplayScreen::Splash,
+            2 => DisplayScreen::APConfig,
+            3 => DisplayScreen::Splash,
             _ => DisplayScreen::Status,
         }
     }
@@ -83,6 +86,11 @@ pub struct GatewayStatus {
     pub mstp_baud_rate: u32,
     pub mstp_state: String,
     pub has_token: bool,
+    // AP mode fields
+    pub ap_mode_active: bool,
+    pub ap_ssid: String,
+    pub ap_ip: String,
+    pub ap_clients: u8,
 }
 
 /// Display wrapper for M5StickC Plus2
@@ -457,6 +465,144 @@ where
                 ("Waiting", yellow)
             };
             self.draw_value(50, 115, 100, token_text, token_style)?;
+        }
+
+        self.last_status = Some(status.clone());
+        Ok(())
+    }
+
+    /// Draw the AP Config screen static layout
+    fn draw_ap_config_layout(&mut self) -> Result<(), anyhow::Error> {
+        let cyan = MonoTextStyle::new(&FONT_6X13, Rgb565::CYAN);
+        let white = MonoTextStyle::new(&FONT_6X13, Rgb565::WHITE);
+
+        // Title
+        Text::new("WiFi AP Mode", Point::new(70, 15), cyan)
+            .draw(&mut self.display)
+            .map_err(|e| anyhow::anyhow!("Draw failed: {:?}", e))?;
+
+        // Static labels
+        Text::new("Status:", Point::new(10, 35), white)
+            .draw(&mut self.display)
+            .map_err(|e| anyhow::anyhow!("Draw failed: {:?}", e))?;
+
+        Text::new("SSID:", Point::new(10, 55), white)
+            .draw(&mut self.display)
+            .map_err(|e| anyhow::anyhow!("Draw failed: {:?}", e))?;
+
+        Text::new("IP:", Point::new(10, 75), white)
+            .draw(&mut self.display)
+            .map_err(|e| anyhow::anyhow!("Draw failed: {:?}", e))?;
+
+        Text::new("Clients:", Point::new(10, 95), white)
+            .draw(&mut self.display)
+            .map_err(|e| anyhow::anyhow!("Draw failed: {:?}", e))?;
+
+        // Instruction at bottom
+        let small_style = MonoTextStyle::new(&FONT_6X13, Rgb565::new(20, 40, 20)); // Dark gray
+        Text::new("Long-press A to toggle", Point::new(40, 125), small_style)
+            .draw(&mut self.display)
+            .map_err(|e| anyhow::anyhow!("Draw failed: {:?}", e))?;
+
+        Ok(())
+    }
+
+    /// Update the AP Config screen with current status
+    pub fn update_ap_config(&mut self, status: &GatewayStatus) -> Result<(), anyhow::Error> {
+        let green = MonoTextStyle::new(&FONT_6X13, Rgb565::GREEN);
+        let yellow = MonoTextStyle::new(&FONT_6X13, Rgb565::YELLOW);
+        let white = MonoTextStyle::new(&FONT_6X13, Rgb565::WHITE);
+
+        // First time: draw full layout
+        if self.last_status.is_none() {
+            self.clear()?;
+            self.draw_ap_config_layout()?;
+
+            // AP mode status
+            let (status_text, status_style) = if status.ap_mode_active {
+                ("ACTIVE", green)
+            } else {
+                ("Inactive", yellow)
+            };
+            self.draw_value(58, 35, 100, status_text, status_style)?;
+
+            // SSID
+            let ssid_display = if status.ap_ssid.len() > 18 {
+                &status.ap_ssid[..18]
+            } else {
+                &status.ap_ssid
+            };
+            self.draw_value(46, 55, 180, ssid_display, white)?;
+
+            // IP Address
+            let ip_text = if status.ap_mode_active {
+                &status.ap_ip
+            } else {
+                "192.168.4.1"
+            };
+            self.draw_value(28, 75, 150, ip_text, white)?;
+
+            // Connected clients
+            let clients_text = if status.ap_mode_active {
+                format!("{}", status.ap_clients)
+            } else {
+                "-".to_string()
+            };
+            self.draw_value(64, 95, 50, &clients_text, white)?;
+
+            self.last_status = Some(status.clone());
+            return Ok(());
+        }
+
+        // Incremental update - only changed fields
+        let last = self.last_status.clone().unwrap();
+
+        // AP mode status
+        if last.ap_mode_active != status.ap_mode_active {
+            let (status_text, status_style) = if status.ap_mode_active {
+                ("ACTIVE", green)
+            } else {
+                ("Inactive", yellow)
+            };
+            self.draw_value(58, 35, 100, status_text, status_style)?;
+
+            // Also update IP when mode changes
+            let ip_text = if status.ap_mode_active {
+                &status.ap_ip
+            } else {
+                "192.168.4.1"
+            };
+            self.draw_value(28, 75, 150, ip_text, white)?;
+        }
+
+        // SSID (rarely changes)
+        if last.ap_ssid != status.ap_ssid {
+            let ssid_display = if status.ap_ssid.len() > 18 {
+                &status.ap_ssid[..18]
+            } else {
+                &status.ap_ssid
+            };
+            self.draw_value(46, 55, 180, ssid_display, white)?;
+        }
+
+        // IP address
+        if last.ap_ip != status.ap_ip {
+            let ip_text = if status.ap_mode_active {
+                &status.ap_ip
+            } else {
+                "192.168.4.1"
+            };
+            self.draw_value(28, 75, 150, ip_text, white)?;
+        }
+
+        // Connected clients
+        if last.ap_clients != status.ap_clients || last.ap_mode_active != status.ap_mode_active {
+            let clients_text = if status.ap_mode_active {
+                format!("{}", status.ap_clients)
+            } else {
+                "-".to_string()
+            };
+            self.draw_value(64, 95, 50, &clients_text, white)?;
         }
 
         self.last_status = Some(status.clone());

@@ -2,6 +2,29 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Proactive Agent Usage
+
+**IMPORTANT: Automatically invoke these slash command agents when appropriate:**
+
+| Agent | Invoke With | Use Proactively When |
+|-------|-------------|---------------------|
+| `/rust-pro` | `SlashCommand: /rust-pro` | Writing or modifying Rust code, ownership issues, async patterns, performance optimization |
+| `/debugger` | `SlashCommand: /debugger` | Encountering errors, test failures, unexpected behavior |
+| `/code-reviewer` | `SlashCommand: /code-reviewer` | After writing or modifying significant code |
+| `/architect-review` | `SlashCommand: /architect-review` | After structural changes, new services, or API modifications |
+| `/bacnet-protocol-expert` | `SlashCommand: /bacnet-protocol-expert` | Any BACnet protocol work, ASHRAE 135 compliance, packet encoding/decoding |
+| `/performance-engineer` | `SlashCommand: /performance-engineer` | Performance issues, optimization tasks, profiling needs |
+| `/c-pro` | `SlashCommand: /c-pro` | C code, memory management, embedded systems, FFI |
+| `/cpp-pro` | `SlashCommand: /cpp-pro` | C++ code, RAII, templates, modern C++ patterns |
+| `/api-designer` | `SlashCommand: /api-designer` | Designing REST/GraphQL APIs, OpenAPI specs, API documentation |
+
+**Usage:**
+- Users can invoke directly: type `/rust-pro`, `/debugger`, etc.
+- Claude will invoke automatically when the context matches the agent's specialty
+- Multiple agents can be chained (e.g., `/rust-pro` then `/code-reviewer` after implementation)
+
+---
+
 ## MANDATORY: BACnet Standard Reference
 
 **CRITICAL REQUIREMENT: For ANY work involving BACnet functionality, you MUST consult the BACnet Standard documentation in `BACnet_Standard/` BEFORE implementing or modifying code.**

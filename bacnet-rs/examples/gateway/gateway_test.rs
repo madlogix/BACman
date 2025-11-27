@@ -51,6 +51,7 @@ impl Default for GatewayTestConfig {
 
 /// Structure to hold discovered device information
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct DiscoveredDevice {
     device_id: u32,
     address: SocketAddr,
@@ -232,7 +233,7 @@ fn run_gateway_tests(config: &GatewayTestConfig) -> Result<TestResults, Box<dyn 
                                 println!("  │ Source Network: {:>5} (ROUTED via gateway)               │", net);
                             }
                             if let Some(ref addr) = device.source_address {
-                                println!("  │ MS/TP Address: {:>6}                                      │", addr.get(0).map(|a| a.to_string()).unwrap_or_default());
+                                println!("  │ MS/TP Address: {:>6}                                      │", addr.first().map(|a| a.to_string()).unwrap_or_default());
                             }
                         } else {
                             println!("  │ Connection: Direct (not routed)                            │");

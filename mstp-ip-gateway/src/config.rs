@@ -23,14 +23,21 @@ mod nvs_keys {
     pub const DEV_INST: &str = "dev_inst";
     pub const DEV_NAME: &str = "dev_name";
     pub const CONFIGURED: &str = "configured";
+    // AP mode settings
+    pub const AP_SSID: &str = "ap_ssid";
+    pub const AP_PASS: &str = "ap_pass";
 }
 
 /// Gateway configuration settings
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
-    // WiFi settings
+    // WiFi Station mode settings
     pub wifi_ssid: String,
     pub wifi_password: String,
+
+    // WiFi Access Point mode settings
+    pub ap_ssid: String,
+    pub ap_password: String,
 
     // MS/TP settings
     pub mstp_address: u8,
@@ -50,9 +57,14 @@ pub struct GatewayConfig {
 impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
-            // WiFi - Default values (should be overwritten from NVS or configured)
+            // WiFi Station mode - Default values (should be overwritten from NVS or configured)
             wifi_ssid: "XwLess".to_string(),
             wifi_password: "madd0xwr0ss".to_string(),
+
+            // WiFi Access Point mode - creates "BACman-XXXX" network
+            // Password must be 8+ characters for WPA2
+            ap_ssid: "BACman-Gateway".to_string(),
+            ap_password: "bacnet123".to_string(),
 
             // MS/TP settings
             mstp_address: 3,        // Gateway's MS/TP address (0-127 for master)
@@ -99,12 +111,20 @@ impl GatewayConfig {
 
         let mut config = Self::default();
 
-        // Load WiFi settings
+        // Load WiFi Station mode settings
         if let Ok(Some(ssid)) = Self::get_string(&nvs, nvs_keys::WIFI_SSID) {
             config.wifi_ssid = ssid;
         }
         if let Ok(Some(pass)) = Self::get_string(&nvs, nvs_keys::WIFI_PASS) {
             config.wifi_password = pass;
+        }
+
+        // Load WiFi AP mode settings
+        if let Ok(Some(ap_ssid)) = Self::get_string(&nvs, nvs_keys::AP_SSID) {
+            config.ap_ssid = ap_ssid;
+        }
+        if let Ok(Some(ap_pass)) = Self::get_string(&nvs, nvs_keys::AP_PASS) {
+            config.ap_password = ap_pass;
         }
 
         // Load MS/TP settings
@@ -147,9 +167,13 @@ impl GatewayConfig {
 
         info!("Saving configuration to NVS...");
 
-        // Save WiFi settings
+        // Save WiFi Station mode settings
         Self::set_string(&mut nvs, nvs_keys::WIFI_SSID, &self.wifi_ssid)?;
         Self::set_string(&mut nvs, nvs_keys::WIFI_PASS, &self.wifi_password)?;
+
+        // Save WiFi AP mode settings
+        Self::set_string(&mut nvs, nvs_keys::AP_SSID, &self.ap_ssid)?;
+        Self::set_string(&mut nvs, nvs_keys::AP_PASS, &self.ap_password)?;
 
         // Save MS/TP settings
         nvs.set_u8(nvs_keys::MSTP_ADDR, self.mstp_address)?;

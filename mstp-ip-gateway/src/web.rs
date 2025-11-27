@@ -32,6 +32,8 @@ pub struct WebState {
     pub discovered_devices: Vec<DiscoveredDevice>,
     pub scan_in_progress: bool,
     pub start_time: std::time::Instant,
+    /// Last few received BACnet data frames for debugging (source_mac, hex_data)
+    pub last_rx_frames: std::collections::VecDeque<(u8, String)>,
 }
 
 /// Gateway stats snapshot for web display
@@ -55,6 +57,16 @@ impl WebState {
             discovered_devices: Vec::new(),
             scan_in_progress: false,
             start_time: std::time::Instant::now(),
+            last_rx_frames: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Add a received frame to the debug buffer (keeps last 10)
+    pub fn add_rx_frame(&mut self, source_mac: u8, data: &[u8]) {
+        let hex = data.iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" ");
+        self.last_rx_frames.push_back((source_mac, hex));
+        while self.last_rx_frames.len() > 10 {
+            self.last_rx_frames.pop_front();
         }
     }
 
@@ -293,6 +305,22 @@ pub fn start_web_server(
         Ok::<(), anyhow::Error>(())
     })?;
 
+    // API endpoint to get last received frames (debug)
+    let state_debug = Arc::clone(&state);
+    server.fn_handler("/api/debug/frames", embedded_svc::http::Method::Get, move |req| {
+        let state = state_debug.lock().unwrap();
+        let frames: Vec<String> = state.last_rx_frames.iter()
+            .map(|(mac, hex)| format!("{{\"mac\":{},\"data\":\"{}\"}}", mac, hex))
+            .collect();
+        let json = format!("{{\"frames\":[{}]}}", frames.join(","));
+        let mut resp = req.into_response(200, Some("OK"), &[
+            ("Content-Type", "application/json"),
+            ("Access-Control-Allow-Origin", "*"),
+        ])?;
+        resp.write_all(json.as_bytes())?;
+        Ok::<(), anyhow::Error>(())
+    })?;
+
     info!("Web server started successfully");
     Ok(server)
 }
@@ -311,6 +339,13 @@ fn parse_config_form(body: &str, config: &mut GatewayConfig) {
                 // Only update if not empty (allows keeping existing password)
                 if !value.is_empty() {
                     config.wifi_password = value.to_string();
+                }
+            }
+            "ap_ssid" => config.ap_ssid = value.to_string(),
+            "ap_pass" => {
+                // Only update if not empty (allows keeping existing password)
+                if !value.is_empty() {
+                    config.ap_password = value.to_string();
                 }
             }
             "mstp_addr" => {
@@ -450,6 +485,9 @@ fn generate_status_page(state: &WebState) -> String {
                     // Uptime
                     document.getElementById('uptime').textContent = data.uptime;
 
+                    // Device count chip
+                    document.getElementById('device-count').textContent = data.master_count + ' found';
+
                     updateDeviceGrid(data.discovered_masters, data.station_address);
                 }})
                 .catch(e => console.error('Update failed:', e));
@@ -555,12 +593,19 @@ fn generate_status_page(state: &WebState) -> String {
         </nav>
 
         <div class="card">
-            <h2>MS/TP Device Map (0-127)</h2>
+            <div class="card-header">
+                <h2>MS/TP Device Map <span class="chip" id="device-count">{} found</span></h2>
+                <button class="btn btn-sm" id="scanBtn" onclick="startScan()">Scan (Who-Is)</button>
+            </div>
             <div class="device-grid" id="device-grid">{}</div>
             <div class="grid-legend">
                 <span><span class="legend-box self"></span> This Device</span>
                 <span><span class="legend-box active"></span> Active Master</span>
                 <span><span class="legend-box"></span> Not Found</span>
+            </div>
+            <div id="scan-results" style="margin-top:12px;display:none;">
+                <div class="scan-status" id="scan-status"></div>
+                <div id="device-list"></div>
             </div>
         </div>
 
@@ -673,7 +718,7 @@ fn generate_status_page(state: &WebState) -> String {
                 </div>
                 <div class="status-item">
                     <span class="label">IP Address</span>
-                    <span class="value">{}</span>
+                    <span class="value auto-size">{}</span>
                 </div>
                 <div class="status-item">
                     <span class="label">MS/TP to IP</span>
@@ -717,11 +762,6 @@ fn generate_status_page(state: &WebState) -> String {
             <div class="button-row">
                 <button class="btn" onclick="resetStats()">Reset Statistics</button>
                 <button class="btn" onclick="exportData()">Export JSON</button>
-                <button class="btn btn-primary" id="scanBtn" onclick="startScan()">Scan Devices (Who-Is)</button>
-            </div>
-            <div id="scan-results" style="margin-top:16px;display:none;">
-                <div class="scan-status" id="scan-status"></div>
-                <div id="device-list"></div>
             </div>
         </div>
 
@@ -740,6 +780,8 @@ fn generate_status_page(state: &WebState) -> String {
         CSS_STYLES,
         masters_hex,
         state.mstp_stats.station_address,
+        // Device Map card
+        state.mstp_stats.master_count,
         generate_device_grid_html(state.mstp_stats.discovered_masters, state.mstp_stats.station_address),
         // State Machine card
         get_state_name(state.mstp_stats.current_state),
@@ -855,7 +897,8 @@ fn generate_config_page_with_message(state: &WebState, message: &str) -> String 
 
         <form method="POST" action="/config">
             <div class="card">
-                <h2>WiFi Settings</h2>
+                <h2>WiFi Station Mode</h2>
+                <p class="hint">Connect to an existing WiFi network</p>
                 <div class="form-group">
                     <label for="wifi_ssid">SSID</label>
                     <input type="text" id="wifi_ssid" name="wifi_ssid" value="{}" maxlength="32">
@@ -863,6 +906,19 @@ fn generate_config_page_with_message(state: &WebState, message: &str) -> String 
                 <div class="form-group">
                     <label for="wifi_pass">Password</label>
                     <input type="password" id="wifi_pass" name="wifi_pass" placeholder="(leave blank to keep current)" maxlength="64">
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>WiFi Access Point Mode</h2>
+                <p class="hint">Create a WiFi hotspot (activate via long-press on APConfig screen)</p>
+                <div class="form-group">
+                    <label for="ap_ssid">AP SSID</label>
+                    <input type="text" id="ap_ssid" name="ap_ssid" value="{}" maxlength="32">
+                </div>
+                <div class="form-group">
+                    <label for="ap_pass">AP Password (min 8 chars)</label>
+                    <input type="password" id="ap_pass" name="ap_pass" placeholder="(leave blank to keep current)" maxlength="64" minlength="8">
                 </div>
             </div>
 
@@ -945,6 +1001,7 @@ fn generate_config_page_with_message(state: &WebState, message: &str) -> String 
         CSS_STYLES,
         message_html,
         state.config.wifi_ssid,
+        state.config.ap_ssid,
         state.config.mstp_address,
         state.config.mstp_max_master,
         if state.config.mstp_baud_rate == 9600 { "selected" } else { "" },
@@ -1139,16 +1196,20 @@ const CSS_STYLES: &str = r#"
 body { font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; background: #0a0a0a; color: #e0e0e0; line-height: 1.6; }
 .container { max-width: 800px; margin: 0 auto; padding: 24px; }
 h1 { color: #fff; text-align: center; margin-bottom: 24px; font-size: 1.5em; font-weight: 600; letter-spacing: 2px; text-transform: uppercase; }
-h2 { color: #fff; margin-bottom: 16px; font-size: 0.9em; font-weight: 500; letter-spacing: 1px; text-transform: uppercase; border-bottom: 1px solid #2a2a2a; padding-bottom: 8px; }
+h2 { color: #fff; margin-bottom: 10px; font-size: 0.8em; font-weight: 500; letter-spacing: 1px; text-transform: uppercase; border-bottom: 1px solid #2a2a2a; padding-bottom: 6px; }
 nav { display: flex; justify-content: center; gap: 4px; margin-bottom: 24px; }
 nav a { color: #666; text-decoration: none; padding: 10px 24px; font-size: 0.85em; letter-spacing: 1px; text-transform: uppercase; border: 1px solid #222; transition: all 0.2s; }
 nav a:hover { color: #fff; border-color: #444; }
 nav a.active { color: #fff; background: #1a1a1a; border-color: #333; }
-.card { background: #111; border: 1px solid #222; padding: 24px; margin-bottom: 16px; }
-.status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
-.status-item { background: #0a0a0a; border: 1px solid #1a1a1a; padding: 16px; text-align: center; }
-.status-item .label { display: block; color: #555; font-size: 0.7em; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 8px; }
-.status-item .value { display: block; font-size: 1.3em; font-weight: 600; color: #fff; font-variant-numeric: tabular-nums; }
+.card { background: #111; border: 1px solid #222; padding: 16px; margin-bottom: 12px; }
+.card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; border-bottom: 1px solid #2a2a2a; padding-bottom: 6px; }
+.card-header h2 { margin-bottom: 0; border-bottom: none; padding-bottom: 0; }
+.status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 6px; }
+.status-item { background: #0a0a0a; border: 1px solid #1a1a1a; padding: 8px 10px; text-align: center; }
+.status-item .label { display: block; color: #555; font-size: 0.65em; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 2px; }
+.status-item .value { display: block; font-size: 1.1em; font-weight: 600; color: #fff; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.status-item .value.auto-size { font-size: clamp(0.7em, 2.5vw, 1.1em); }
+.chip { display: inline-block; background: #333; color: #fff; padding: 2px 8px; font-size: 0.7em; font-weight: 400; margin-left: 8px; vertical-align: middle; }
 .status-item .value.ok { color: #888; }
 .status-item .value.error { color: #fff; background: #333; padding: 2px 8px; }
 .status-item .value.warning { color: #000; background: #fff; padding: 2px 8px; animation: blink 1s infinite; }
@@ -1163,12 +1224,14 @@ nav a.active { color: #fff; background: #1a1a1a; border-color: #333; }
 .legend-box.self { background: #fff; }
 .form-group { margin-bottom: 16px; }
 .form-group label { display: block; margin-bottom: 6px; color: #666; font-size: 0.75em; letter-spacing: 1px; text-transform: uppercase; }
+.hint { color: #555; font-size: 0.8em; margin: -8px 0 12px 0; font-style: italic; }
 .form-group input, .form-group select { width: 100%; padding: 12px; border: 1px solid #222; background: #0a0a0a; color: #fff; font-size: 0.95em; font-family: inherit; transition: border-color 0.2s; }
 .form-group input:focus, .form-group select:focus { outline: none; border-color: #444; }
 .form-group input::placeholder { color: #444; }
-.button-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
-.btn { padding: 12px 24px; border: 1px solid #333; background: transparent; color: #fff; cursor: pointer; font-size: 0.8em; font-family: inherit; letter-spacing: 1px; text-transform: uppercase; transition: all 0.2s; }
+.button-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
+.btn { padding: 8px 16px; border: 1px solid #333; background: transparent; color: #fff; cursor: pointer; font-size: 0.75em; font-family: inherit; letter-spacing: 1px; text-transform: uppercase; transition: all 0.2s; }
 .btn:hover { background: #1a1a1a; border-color: #444; }
+.btn-sm { padding: 4px 10px; font-size: 0.65em; }
 .btn-primary { background: #fff; color: #000; border-color: #fff; }
 .btn-primary:hover { background: #ccc; border-color: #ccc; }
 .btn-success { background: #333; border-color: #444; }

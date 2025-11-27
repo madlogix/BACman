@@ -150,14 +150,21 @@ impl LocalDevice {
 
     /// Handle Who-Is request
     fn handle_who_is(&self, data: &[u8]) -> Option<(Vec<u8>, bool)> {
+        info!("*** Who-Is received! Parsing range from {} bytes ***", data.len());
+
         // Parse Who-Is parameters (if any)
         let (low_limit, high_limit) = if data.is_empty() {
             // No range specified - matches all devices
+            info!("Who-Is: No range specified - matches ALL devices");
             (None, None)
         } else {
             // Try to parse range
+            info!("Who-Is: Range data: {:02X?}", data);
             self.parse_who_is_range(data)
         };
+
+        info!("Who-Is: Parsed range: low={:?}, high={:?}, our instance={}",
+              low_limit, high_limit, self.device_instance);
 
         // Check if our device instance is in range
         let matches = match (low_limit, high_limit) {
@@ -170,15 +177,16 @@ impl LocalDevice {
         };
 
         if matches {
-            debug!(
-                "Who-Is matches our device {} (range: {:?}-{:?})",
-                self.device_instance, low_limit, high_limit
+            info!(
+                "Who-Is MATCHES our device {} - generating I-Am response!",
+                self.device_instance
             );
             let iam = self.build_i_am();
+            info!("I-Am APDU generated: {:02X?}", &iam[..iam.len().min(20)]);
             Some((iam, true)) // I-Am is broadcast
         } else {
-            trace!(
-                "Who-Is does not match our device {} (range: {:?}-{:?})",
+            info!(
+                "Who-Is does NOT match our device {} (range: {:?}-{:?})",
                 self.device_instance, low_limit, high_limit
             );
             None
@@ -257,8 +265,8 @@ impl LocalDevice {
         Some((value, consumed + length))
     }
 
-    /// Build I-Am response APDU
-    fn build_i_am(&self) -> Vec<u8> {
+    /// Build I-Am response APDU (public for periodic announcements)
+    pub fn build_i_am(&self) -> Vec<u8> {
         let mut apdu = Vec::with_capacity(20);
 
         // PDU type - Unconfirmed Request
@@ -290,6 +298,31 @@ impl LocalDevice {
 
         debug!("Built I-Am for device {}", self.device_instance);
         apdu
+    }
+
+    /// Build I-Am-Router-To-Network NPDU
+    /// This is a network layer message (not APDU) announcing this router can reach certain networks
+    /// Per BACnet Clause 6.6.3, message type 0x01
+    pub fn build_i_am_router_to_network(networks: &[u16]) -> Vec<u8> {
+        let mut npdu = Vec::with_capacity(4 + networks.len() * 2);
+
+        // NPDU version
+        npdu.push(0x01);
+
+        // Control byte: network layer message (bit 7 = 1)
+        npdu.push(0x80);
+
+        // Message type: I-Am-Router-To-Network = 0x01
+        npdu.push(0x01);
+
+        // List of network numbers this router can reach
+        for &net in networks {
+            npdu.push((net >> 8) as u8);
+            npdu.push((net & 0xFF) as u8);
+        }
+
+        debug!("Built I-Am-Router-To-Network for networks: {:?}", networks);
+        npdu
     }
 
     /// Process confirmed request (ReadProperty, etc.)

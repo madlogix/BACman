@@ -318,7 +318,56 @@ impl BacnetObject for AnalogInput {
                 Ok(PropertyValue::Enumerated(ObjectType::AnalogInput as u32))
             }
             PropertyIdentifier::PresentValue => Ok(PropertyValue::Real(self.present_value)),
+            PropertyIdentifier::Description => {
+                Ok(PropertyValue::CharacterString(self.description.clone()))
+            }
+            PropertyIdentifier::StatusFlags => {
+                // StatusFlags is a BIT STRING of 4 bits: {in-alarm, fault, overridden, out-of-service}
+                Ok(PropertyValue::BitString(vec![
+                    (self.status_flags & 0x08) != 0,
+                    (self.status_flags & 0x04) != 0,
+                    (self.status_flags & 0x02) != 0,
+                    (self.status_flags & 0x01) != 0,
+                ]))
+            }
+            PropertyIdentifier::EventState => {
+                Ok(PropertyValue::Enumerated(self.event_state as u32))
+            }
+            PropertyIdentifier::Reliability => {
+                Ok(PropertyValue::Enumerated(self.reliability as u32))
+            }
             PropertyIdentifier::OutOfService => Ok(PropertyValue::Boolean(self.out_of_service)),
+            PropertyIdentifier::Units => {
+                Ok(PropertyValue::Enumerated(self.units.to_u32()))
+            }
+            PropertyIdentifier::MinPresValue => {
+                if let Some(v) = self.min_pres_value {
+                    Ok(PropertyValue::Real(v))
+                } else {
+                    Err(ObjectError::UnknownProperty)
+                }
+            }
+            PropertyIdentifier::MaxPresValue => {
+                if let Some(v) = self.max_pres_value {
+                    Ok(PropertyValue::Real(v))
+                } else {
+                    Err(ObjectError::UnknownProperty)
+                }
+            }
+            PropertyIdentifier::Resolution => {
+                if let Some(v) = self.resolution {
+                    Ok(PropertyValue::Real(v))
+                } else {
+                    Err(ObjectError::UnknownProperty)
+                }
+            }
+            PropertyIdentifier::CovIncrement => {
+                if let Some(v) = self.cov_increment {
+                    Ok(PropertyValue::Real(v))
+                } else {
+                    Err(ObjectError::UnknownProperty)
+                }
+            }
             _ => Err(ObjectError::UnknownProperty),
         }
     }
@@ -358,7 +407,12 @@ impl BacnetObject for AnalogInput {
             PropertyIdentifier::ObjectName,
             PropertyIdentifier::ObjectType,
             PropertyIdentifier::PresentValue,
+            PropertyIdentifier::Description,
+            PropertyIdentifier::StatusFlags,
+            PropertyIdentifier::EventState,
+            PropertyIdentifier::Reliability,
             PropertyIdentifier::OutOfService,
+            PropertyIdentifier::Units,
         ]
     }
 }
@@ -380,7 +434,27 @@ impl BacnetObject for AnalogOutput {
                 Ok(PropertyValue::Enumerated(ObjectType::AnalogOutput as u32))
             }
             PropertyIdentifier::PresentValue => Ok(PropertyValue::Real(self.present_value)),
+            PropertyIdentifier::Description => {
+                Ok(PropertyValue::CharacterString(self.description.clone()))
+            }
+            PropertyIdentifier::StatusFlags => {
+                Ok(PropertyValue::BitString(vec![
+                    (self.status_flags & 0x08) != 0,
+                    (self.status_flags & 0x04) != 0,
+                    (self.status_flags & 0x02) != 0,
+                    (self.status_flags & 0x01) != 0,
+                ]))
+            }
+            PropertyIdentifier::EventState => {
+                Ok(PropertyValue::Enumerated(self.event_state as u32))
+            }
+            PropertyIdentifier::Reliability => {
+                Ok(PropertyValue::Enumerated(self.reliability as u32))
+            }
             PropertyIdentifier::OutOfService => Ok(PropertyValue::Boolean(self.out_of_service)),
+            PropertyIdentifier::Units => {
+                Ok(PropertyValue::Enumerated(self.units.to_u32()))
+            }
             PropertyIdentifier::PriorityArray => {
                 let array: Vec<PropertyValue> = self
                     .priority_array
@@ -391,6 +465,9 @@ impl BacnetObject for AnalogOutput {
                     })
                     .collect();
                 Ok(PropertyValue::Array(array))
+            }
+            PropertyIdentifier::RelinquishDefault => {
+                Ok(PropertyValue::Real(self.relinquish_default))
             }
             _ => Err(ObjectError::UnknownProperty),
         }
@@ -422,6 +499,14 @@ impl BacnetObject for AnalogOutput {
                     Err(ObjectError::InvalidPropertyType)
                 }
             }
+            PropertyIdentifier::RelinquishDefault => {
+                if let PropertyValue::Real(val) = value {
+                    self.relinquish_default = val;
+                    Ok(())
+                } else {
+                    Err(ObjectError::InvalidPropertyType)
+                }
+            }
             _ => Err(ObjectError::PropertyNotWritable),
         }
     }
@@ -432,6 +517,7 @@ impl BacnetObject for AnalogOutput {
             PropertyIdentifier::ObjectName
                 | PropertyIdentifier::PresentValue
                 | PropertyIdentifier::OutOfService
+                | PropertyIdentifier::RelinquishDefault
         )
     }
 
@@ -441,8 +527,14 @@ impl BacnetObject for AnalogOutput {
             PropertyIdentifier::ObjectName,
             PropertyIdentifier::ObjectType,
             PropertyIdentifier::PresentValue,
+            PropertyIdentifier::Description,
+            PropertyIdentifier::StatusFlags,
+            PropertyIdentifier::EventState,
+            PropertyIdentifier::Reliability,
             PropertyIdentifier::OutOfService,
+            PropertyIdentifier::Units,
             PropertyIdentifier::PriorityArray,
+            PropertyIdentifier::RelinquishDefault,
         ]
     }
 }
@@ -464,7 +556,27 @@ impl BacnetObject for AnalogValue {
                 Ok(PropertyValue::Enumerated(ObjectType::AnalogValue as u32))
             }
             PropertyIdentifier::PresentValue => Ok(PropertyValue::Real(self.present_value)),
+            PropertyIdentifier::Description => {
+                Ok(PropertyValue::CharacterString(self.description.clone()))
+            }
+            PropertyIdentifier::StatusFlags => {
+                Ok(PropertyValue::BitString(vec![
+                    (self.status_flags & 0x08) != 0,
+                    (self.status_flags & 0x04) != 0,
+                    (self.status_flags & 0x02) != 0,
+                    (self.status_flags & 0x01) != 0,
+                ]))
+            }
+            PropertyIdentifier::EventState => {
+                Ok(PropertyValue::Enumerated(self.event_state as u32))
+            }
+            PropertyIdentifier::Reliability => {
+                Ok(PropertyValue::Enumerated(self.reliability as u32))
+            }
             PropertyIdentifier::OutOfService => Ok(PropertyValue::Boolean(self.out_of_service)),
+            PropertyIdentifier::Units => {
+                Ok(PropertyValue::Enumerated(self.units.to_u32()))
+            }
             PropertyIdentifier::PriorityArray => {
                 let array: Vec<PropertyValue> = self
                     .priority_array
@@ -475,6 +587,9 @@ impl BacnetObject for AnalogValue {
                     })
                     .collect();
                 Ok(PropertyValue::Array(array))
+            }
+            PropertyIdentifier::RelinquishDefault => {
+                Ok(PropertyValue::Real(self.relinquish_default))
             }
             _ => Err(ObjectError::UnknownProperty),
         }
@@ -506,6 +621,14 @@ impl BacnetObject for AnalogValue {
                     Err(ObjectError::InvalidPropertyType)
                 }
             }
+            PropertyIdentifier::RelinquishDefault => {
+                if let PropertyValue::Real(val) = value {
+                    self.relinquish_default = val;
+                    Ok(())
+                } else {
+                    Err(ObjectError::InvalidPropertyType)
+                }
+            }
             _ => Err(ObjectError::PropertyNotWritable),
         }
     }
@@ -516,6 +639,7 @@ impl BacnetObject for AnalogValue {
             PropertyIdentifier::ObjectName
                 | PropertyIdentifier::PresentValue
                 | PropertyIdentifier::OutOfService
+                | PropertyIdentifier::RelinquishDefault
         )
     }
 
@@ -525,6 +649,10 @@ impl BacnetObject for AnalogValue {
             PropertyIdentifier::ObjectName,
             PropertyIdentifier::ObjectType,
             PropertyIdentifier::PresentValue,
+            PropertyIdentifier::Description,
+            PropertyIdentifier::StatusFlags,
+            PropertyIdentifier::EventState,
+            PropertyIdentifier::Reliability,
             PropertyIdentifier::OutOfService,
             PropertyIdentifier::PriorityArray,
         ]

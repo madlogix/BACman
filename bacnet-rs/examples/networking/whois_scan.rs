@@ -1,10 +1,21 @@
 //! BACnet Who-Is Scan Example
 //!
 //! This example demonstrates how to perform a Who-Is scan to discover
-//! BACnet devices on the network using the corrected service layer implementation.
+//! BACnet devices on the network using the production-grade broadcast implementation.
+//!
+//! # Broadcast Configuration
+//!
+//! By default, the scanner now sends to:
+//! - Global broadcast (255.255.255.255:47808) for maximum reach
+//! - Local subnet broadcast (calculated from IP and subnet mask)
+//!
+//! You can customize the broadcast behavior using `BroadcastConfig`.
 
 use bacnet_rs::{
-    datalink::{bip::BacnetIpDataLink, DataLink, DataLinkAddress},
+    datalink::{
+        bip::{BacnetIpDataLink, BroadcastConfig},
+        DataLink, DataLinkAddress,
+    },
     network::Npdu,
     service::{IAmRequest, UnconfirmedServiceChoice, WhoIsRequest},
     vendor::get_vendor_name,
@@ -14,6 +25,11 @@ use std::{
     net::SocketAddr,
     time::{Duration, Instant},
 };
+
+// Note: Ipv4Addr is available via BroadcastConfig if you need to add custom broadcast addresses:
+// use std::net::Ipv4Addr;
+// let config = BroadcastConfig::default()
+//     .with_additional_broadcast(Ipv4Addr::new(192, 168, 1, 255));
 
 /// Structure to hold discovered device information
 #[derive(Debug, Clone)]
@@ -27,15 +43,44 @@ struct DiscoveredDevice {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("BACnet Who-Is Scan Example");
-    println!("========================\n");
+    println!("BACnet Who-Is Scan Example (Production-Grade)");
+    println!("=============================================\n");
 
-    // Create BACnet/IP data link (use 0 to let system choose port)
+    // Create broadcast configuration
+    // Default config sends to both global (255.255.255.255) and local subnet broadcast
+    // You can customize this for your network topology:
+    //
+    // Option 1: Default (recommended for unknown networks)
+    let config = BroadcastConfig::default();
+    //
+    // Option 2: Explicit subnet mask (if you know your network)
+    // let config = BroadcastConfig::with_subnet_mask([255, 255, 255, 0]);
+    //
+    // Option 3: Multiple subnets
+    // let config = BroadcastConfig::default()
+    //     .with_additional_broadcast(Ipv4Addr::new(192, 168, 1, 255))
+    //     .with_additional_broadcast(Ipv4Addr::new(10, 0, 0, 255));
+    //
+    // Option 4: Global broadcast only
+    // let config = BroadcastConfig::global_only();
+
+    // Create BACnet/IP data link with broadcast config
     println!("Creating BACnet/IP data link...");
-    let mut datalink = BacnetIpDataLink::new("0.0.0.0:0")?;
+    let mut datalink = BacnetIpDataLink::with_config("0.0.0.0:0", config)?;
 
     println!("Data link created successfully");
-    println!("Starting Who-Is scan...\n");
+    println!("  Local address: {:?}", datalink.local_address());
+    println!("  Subnet mask: {:?}", datalink.subnet_mask());
+    println!("  Local broadcast: {}", datalink.local_broadcast_addr());
+    println!(
+        "  Global broadcast enabled: {}",
+        datalink.broadcast_config().use_global_broadcast
+    );
+    println!(
+        "  Local broadcast enabled: {}",
+        datalink.broadcast_config().use_local_broadcast
+    );
+    println!("\nStarting Who-Is scan...\n");
 
     // Create Who-Is request (broadcast to all devices)
     let whois = WhoIsRequest::new();
@@ -60,30 +105,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut message = npdu_buffer;
     message.extend_from_slice(&apdu_buffer);
 
-    // Send the Who-Is broadcast
+    // Send the Who-Is broadcast using the detailed API to see what happened
     println!("Sending Who-Is broadcast...");
-    match datalink.send_frame(&message, &DataLinkAddress::Broadcast) {
-        Ok(_) => println!("Broadcast sent successfully"),
-        Err(e) => println!("Warning: Broadcast failed: {:?}", e),
+    let broadcast_result = datalink.send_broadcast_npdu_detailed(&message);
+
+    println!("Broadcast results:");
+    println!(
+        "  Successful: {} destinations",
+        broadcast_result.success_count()
+    );
+    println!("  Failed: {} destinations", broadcast_result.failure_count());
+
+    for success in &broadcast_result.successes {
+        println!(
+            "  ✓ {:?} -> {} ({} bytes)",
+            success.broadcast_type, success.address, success.bytes_sent
+        );
     }
 
-    // Also try specific local subnet broadcasts
-    let local_broadcasts = vec![
-        "10.161.1.255:47808",
-        "192.168.1.255:47808",
-        "192.168.0.255:47808",
-        "172.16.0.255:47808",
-    ];
+    for failure in &broadcast_result.failures {
+        println!(
+            "  ✗ {:?} -> {}: {}",
+            failure.broadcast_type, failure.address, failure.error
+        );
+    }
 
-    for addr_str in &local_broadcasts {
-        if let Ok(addr) = addr_str.parse::<SocketAddr>() {
-            if datalink
-                .send_frame(&message, &DataLinkAddress::Ip(addr))
-                .is_ok()
-            {
-                println!("Sent Who-Is to local broadcast: {}", addr);
-            }
-        }
+    if !broadcast_result.any_success() {
+        println!("WARNING: No broadcasts succeeded! Check network configuration.");
     }
 
     println!("\nListening for I-Am responses...\n");

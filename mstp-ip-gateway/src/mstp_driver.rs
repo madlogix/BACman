@@ -76,6 +76,7 @@ pub enum MstpError {
     CrcError,
     Timeout,
     BufferFull,
+    BusyMedium, // Medium is busy (another station is transmitting)
 }
 
 impl std::fmt::Display for MstpError {
@@ -86,6 +87,7 @@ impl std::fmt::Display for MstpError {
             MstpError::CrcError => write!(f, "CRC error"),
             MstpError::Timeout => write!(f, "Timeout"),
             MstpError::BufferFull => write!(f, "Buffer full"),
+            MstpError::BusyMedium => write!(f, "Medium busy"),
         }
     }
 }
@@ -204,7 +206,7 @@ impl<'a> MstpDriver<'a> {
             usage_timer: None,
             reply_delay_timer: None,
             no_token_timer: now,
-            t_no_token: 500,
+            t_no_token: 5000,  // Increased to 5s to allow Controller 6 time to complete poll sweep and discover M5Stack (MAC 3)
             t_reply_timeout: 255,
             t_reply_delay: 250,
             t_slot: 10,
@@ -219,6 +221,8 @@ impl<'a> MstpDriver<'a> {
             return Err(MstpError::BufferFull);
         }
 
+        info!("QUEUE: Adding {} bytes to send_queue for dest={}, queue_len_after={}, state={:?}",
+              data.len(), destination, self.send_queue.len() + 1, self.state);
         self.send_queue.push_back((data.to_vec(), destination, expecting_reply));
         Ok(())
     }
@@ -243,13 +247,19 @@ impl<'a> MstpDriver<'a> {
     /// Process incoming UART bytes
     fn process_uart_rx(&mut self) -> Result<(), MstpError> {
         let mut buf = [0u8; 256];
+        let mut total_read = 0usize;
 
         loop {
             match self.uart.read(&mut buf, 0) {
                 Ok(0) => break,
                 Ok(n) => {
+                    // Log raw bytes as they arrive (use info! for diagnostics)
+                    if n > 0 {
+                        info!("UART_RX {} bytes: {:02X?}", n, &buf[..n.min(32)]);
+                    }
                     self.rx_buffer.extend_from_slice(&buf[..n]);
                     self.silence_timer = Instant::now();
+                    total_read += n;
                 }
                 Err(_) => break,
             }
@@ -276,6 +286,8 @@ impl<'a> MstpDriver<'a> {
                 Some(pos) => {
                     // Discard bytes before preamble
                     if pos > 0 {
+                        info!("RX_DISCARD: {} bytes before preamble: {:02X?}",
+                               pos, &self.rx_buffer[..pos.min(16)]);
                         self.rx_buffer.drain(..pos);
                     }
                     0
@@ -284,6 +296,11 @@ impl<'a> MstpDriver<'a> {
                     // Keep last byte in case it's start of preamble
                     if self.rx_buffer.len() > 1 {
                         let keep = self.rx_buffer.len() - 1;
+                        // Log what we're discarding if it's significant
+                        if keep > 4 {
+                            info!("RX_DISCARD: No preamble, discarding {} bytes: {:02X?}",
+                                   keep, &self.rx_buffer[..keep.min(16)]);
+                        }
                         self.rx_buffer.drain(..keep);
                     }
                     return Ok(());
@@ -307,6 +324,8 @@ impl<'a> MstpDriver<'a> {
 
             if calculated_crc != header_crc {
                 self.crc_errors += 1;
+                warn!("Header CRC error: expected 0x{:02X}, got 0x{:02X} (type={}, dest={}, src={})",
+                      calculated_crc, header_crc, frame_type, dest, source);
                 self.rx_buffer.drain(..2); // Skip preamble and try again
                 continue;
             }
@@ -347,6 +366,8 @@ impl<'a> MstpDriver<'a> {
 
                 if received_crc != calculated_crc {
                     self.crc_errors += 1;
+                    warn!("Data CRC error: expected 0x{:04X}, got 0x{:04X} (frame_type={}, src={})",
+                          calculated_crc, received_crc, frame_type, source);
                     self.rx_buffer.drain(..frame_size);
                     continue;
                 }
@@ -358,6 +379,14 @@ impl<'a> MstpDriver<'a> {
 
             // Remove frame from buffer
             self.rx_buffer.drain(..frame_size);
+
+            // Debug: Log ALL valid frames
+            let ftype_name = MstpFrameType::from_u8(frame_type);
+            // CRITICAL DEBUG: Log Token and PollForMaster frames addressed to us
+            if frame_type == 0x00 || frame_type == 0x01 || data.len() > 0 {
+                info!("PARSED FRAME: type={:?}({}) src={} dest={} len={} our_addr={}",
+                      ftype_name, frame_type, source, dest, data.len(), self.station_address);
+            }
 
             // Process frame
             self.handle_received_frame(frame_type, dest, source, data)?;
@@ -374,10 +403,18 @@ impl<'a> MstpDriver<'a> {
     ) -> Result<(), MstpError> {
         let ftype = MstpFrameType::from_u8(frame_type);
 
-        debug!(
-            "RX frame: type={:?} dest={} src={} len={} state={:?}",
-            ftype, dest, source, data.len(), self.state
-        );
+        // Log data frames at info level for debugging
+        if data.len() > 0 || (ftype != Some(MstpFrameType::Token) && ftype != Some(MstpFrameType::PollForMaster)) {
+            info!(
+                "RX frame: type={:?} dest={} src={} len={} state={:?}",
+                ftype, dest, source, data.len(), self.state
+            );
+        } else {
+            trace!(
+                "RX frame: type={:?} dest={} src={} len={} state={:?}",
+                ftype, dest, source, data.len(), self.state
+            );
+        }
 
         // If we're in Initialize and receive a valid frame, transition to Idle
         // This means the bus is active and we should join the network
@@ -419,7 +456,7 @@ impl<'a> MstpDriver<'a> {
             Some(MstpFrameType::Token) => {
                 if dest == self.station_address {
                     // We received the token - transition to UseToken
-                    trace!("Received token from station {}", source);
+                    info!("Received Token from station {} (in Idle)", source);
                     self.token_count += 1;
                     self.tokens_received += 1;
                     self.frame_count = 0;
@@ -456,17 +493,51 @@ impl<'a> MstpDriver<'a> {
                         info!("Another master detected, no longer sole master");
                         self.sole_master = false;
                     }
+
+                    // Update next_station to be the next known master after us
+                    // This ensures proper token ring operation
+                    let old_next = self.next_station;
+                    self.next_station = self.find_next_master();
+                    if self.next_station != old_next {
+                        info!("Updated next_station: {} -> {} (discovered_masters=0x{:X})",
+                              old_next, self.next_station, self.discovered_masters);
+                    }
                 }
             }
             Some(MstpFrameType::PollForMaster) => {
                 // Record source as a discovered master
                 if source <= 127 {
+                    let was_known = (self.discovered_masters & (1u128 << source)) != 0;
                     self.discovered_masters |= 1u128 << source;
+
+                    // CRITICAL FIX: If we discover a new master via their poll, we're not sole master!
+                    // We must also update next_station to include the newly discovered master.
+                    if !was_known {
+                        info!("Discovered new master {} via PollForMaster", source);
+                        if self.sole_master {
+                            info!("No longer sole master - found master at {}", source);
+                            self.sole_master = false;
+                        }
+                        // Recalculate next_station to include newly discovered master
+                        let old_next = self.next_station;
+                        self.next_station = self.find_next_master();
+                        if self.next_station != old_next {
+                            info!("Updated next_station: {} -> {} after discovering master {}",
+                                  old_next, self.next_station, source);
+                        }
+                    }
                 }
                 if dest == self.station_address {
                     // Reply to poll - we're a master
                     info!("Received PollForMaster from station {}, sending reply", source);
                     self.send_reply_to_poll(source)?;
+
+                    // CRITICAL FIX: Reset no_token timer after replying to a poll!
+                    // The polling master is about to include us in the token ring and will
+                    // pass us the token shortly. We must wait for that token instead of
+                    // timing out and starting our own poll sweep.
+                    self.no_token_timer = Instant::now();
+                    info!("Reset no_token_timer after replying to poll from {}", source);
                 }
             }
             Some(MstpFrameType::BacnetDataExpectingReply) => {
@@ -557,15 +628,28 @@ impl<'a> MstpDriver<'a> {
     fn handle_frame_in_poll_for_master(
         &mut self,
         ftype: Option<MstpFrameType>,
-        _dest: u8,
+        dest: u8,
         source: u8,
     ) -> Result<(), MstpError> {
         if let Some(MstpFrameType::ReplyToPollForMaster) = ftype {
-            // Found a master!
-            debug!("Received ReplyToPollForMaster from {}", source);
-            self.next_station = source;
-            self.sole_master = false;
-            self.state = MstpState::PassToken;
+            // Only accept if addressed to us
+            if dest == self.station_address {
+                // Found a master!
+                info!("Received ReplyToPollForMaster from {}, next_station={}", source, source);
+                self.next_station = source;
+                self.sole_master = false;
+
+                // We generated the token via polling, so we should use it first
+                // before passing to the newly discovered master
+                self.token_count += 1;
+                self.tokens_received += 1;
+                self.frame_count = 0;
+                self.state = MstpState::UseToken;
+                self.usage_timer = Some(Instant::now());
+                info!("Transitioning to UseToken (we own the token after polling)");
+            } else {
+                debug!("Ignoring ReplyToPollForMaster not addressed to us (dest={}, we are {})", dest, self.station_address);
+            }
         }
         Ok(())
     }
@@ -621,7 +705,7 @@ impl<'a> MstpDriver<'a> {
                 // Check for no-token timeout
                 if self.no_token_timer.elapsed() > Duration::from_millis(self.t_no_token) {
                     // No token received, try to generate one via polling
-                    debug!("No token timeout, starting PollForMaster");
+                    info!("Idle: No token timeout ({}ms), starting PollForMaster", self.t_no_token);
                     self.poll_station = (self.station_address + 1) % (self.max_master + 1);
                     self.send_poll_for_master(self.poll_station)?;
                     self.state = MstpState::PollForMaster;
@@ -642,21 +726,41 @@ impl<'a> MstpDriver<'a> {
                 // We have the token, send data if available
                 if self.frame_count < self.max_info_frames {
                     if let Some((data, dest, expecting_reply)) = self.send_queue.pop_front() {
+                        info!("UseToken: Sending {} bytes to dest={} (expecting_reply={})",
+                              data.len(), dest, expecting_reply);
                         self.send_data_frame(&data, dest, expecting_reply)?;
                         self.frame_count += 1;
 
                         if expecting_reply {
                             // Transition to WaitForReply
-                            debug!("Sent frame expecting reply, transitioning to WaitForReply");
+                            info!("Sent frame expecting reply, transitioning to WaitForReply");
                             self.reply_timer = Some(Instant::now());
                             self.state = MstpState::WaitForReply;
                         }
+                        // Stay in UseToken to potentially send more frames
                     } else {
                         // No frames to send
+                        // Per MS/TP spec, we should hold the token briefly to allow
+                        // queued data to be sent. Check if we just acquired the token
+                        // (frame_count == 0) and haven't held it long enough.
+                        // Hold for at least 5ms to give application layer a chance to queue data.
+                        if self.frame_count == 0 {
+                            if let Some(timer) = self.usage_timer {
+                                let hold_time_ms = timer.elapsed().as_millis() as u64;
+                                if hold_time_ms < 5 {
+                                    // Still waiting for potential queued frames
+                                    // Return without changing state to allow caller to yield
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        // Log queue status for debugging
+                        trace!("UseToken: send_queue empty, passing token (frame_count={})", self.frame_count);
                         self.state = MstpState::DoneWithToken;
                     }
                 } else {
                     // Sent max frames
+                    debug!("UseToken: max_info_frames reached ({}), passing token", self.max_info_frames);
                     self.state = MstpState::DoneWithToken;
                 }
             }
@@ -731,8 +835,10 @@ impl<'a> MstpDriver<'a> {
             }
 
             MstpState::PassToken => {
+                info!("PassToken: Sending token to station {} (send_queue_len={})",
+                      self.next_station, self.send_queue.len());
                 self.send_token(self.next_station)?;
-                debug!("Token passed to station {}", self.next_station);
+                info!("Token passed to station {}, transitioning to Idle", self.next_station);
                 self.state = MstpState::Idle;
                 self.no_token_timer = Instant::now();
             }
@@ -843,21 +949,159 @@ impl<'a> MstpDriver<'a> {
             frame.push((data_crc >> 8) as u8);
         }
 
-        // Only log data frames, not token/poll traffic
+        // Log all transmitted frames for debugging
         if (ftype as u8) >= 5 {
-            info!("TX frame: type={:?} dest={} len={}", ftype, dest, data_len);
+            info!("TX data frame: type={:?} dest={} len={} data={:02X?}",
+                  ftype, dest, data_len, &data[..data_len.min(20)]);
+            info!("TX RAW FRAME: {:02X?}", &frame[..frame.len().min(30)]);
+        } else {
+            // Log token/poll frames for debugging frame drops
+            info!("TX control frame: type={:?} dest={} raw={:02X?}",
+                   ftype, dest, &frame[..]);
         }
+
+        // Tturnaround delay: minimum 40 bit-times between last received byte and first transmitted byte
+        // At 38400 baud: 40 bits / 38400 bps = ~1.04ms
+        // This is REQUIRED by ASHRAE 135 Clause 9.2.3 for proper RS-485 operation
+        //
+        // IMPORTANT: We wait for Tturnaround since last RX, then check ONE MORE TIME
+        // that no bytes have arrived. If bytes are actively arriving, we're in the
+        // middle of receiving another station's frame and must NOT transmit.
+        //
+        // The key insight is: if we have the token and it's been quiet for Tturnaround,
+        // we can transmit. But if bytes are STILL arriving (e.g., buffered in UART FIFO),
+        // we need to wait for them to finish.
+        // Tturnaround: minimum 40 bit-times = ~1.04ms at 38400 baud
+        // CRITICAL: We need to reply within Tslot (10ms) of receiving a poll,
+        // but some devices use shorter Tslot (5ms). Keep turnaround minimal.
+        let turnaround_us: u64 = 500; // 0.5ms (more than 40 bit-times, but faster response)
+
+        // Wait for initial Tturnaround
+        let silence_us = self.silence_timer.elapsed().as_micros() as u64;
+        if silence_us < turnaround_us {
+            let wait_us = turnaround_us - silence_us;
+            std::thread::sleep(std::time::Duration::from_micros(wait_us));
+        }
+
+        // For ReplyToPollForMaster: SKIP bus activity check entirely!
+        // The polling master just sent us a poll and is waiting for our reply.
+        // There should be NO other traffic. Checking the bus adds delay that
+        // causes us to miss the Tslot window (10ms from poll TX end).
+        //
+        // For other frame types: check if another station is transmitting
+        let is_reply_to_poll = ftype == MstpFrameType::ReplyToPollForMaster;
+        let is_time_critical = ftype == MstpFrameType::Token || is_reply_to_poll;
+
+        if !is_reply_to_poll {
+            // Only check bus activity for non-reply frames
+            let mut check_buf = [0u8; 64];
+            let max_wait_ms = if is_time_critical { 3 } else { 20 };
+
+            if let Ok(n) = self.uart.read(&mut check_buf, 0) {
+                if n > 0 {
+                    // Bytes are actively arriving - add them to buffer
+                    self.rx_buffer.extend_from_slice(&check_buf[..n]);
+                    self.silence_timer = Instant::now();
+
+                    // Now wait for true silence - poll until no more bytes arrive
+                    // with a reasonable timeout
+                    let start = Instant::now();
+                    loop {
+                        if start.elapsed().as_millis() > max_wait_ms as u128 {
+                            // Frame taking too long - go ahead and transmit
+                            if is_time_critical {
+                                warn!("Time-critical TX: forced TX after {}ms wait (bus busy)", max_wait_ms);
+                            }
+                            break;
+                        }
+
+                        std::thread::sleep(std::time::Duration::from_micros(200));
+
+                        if let Ok(n) = self.uart.read(&mut check_buf, 0) {
+                            if n > 0 {
+                                self.rx_buffer.extend_from_slice(&check_buf[..n]);
+                                self.silence_timer = Instant::now();
+                            } else {
+                                if self.silence_timer.elapsed().as_micros() as u64 >= turnaround_us {
+                                    break;
+                                }
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Save frame copy for echo detection
+        let tx_frame_copy = frame.clone();
 
         // Send the frame
         // Note: M5Stack RS-485 HAT has automatic direction control via SP485EEN chip
         // The TX line controls DE/RE automatically - no GPIO needed
         self.uart.write(&frame).map_err(|e| MstpError::IoError(format!("{:?}", e)))?;
 
-        // Wait for all bytes to be transmitted
+        // Wait for TX to complete
         // At 38400 baud: each byte = 10 bits = ~260us
         // Total frame time = frame.len() * 260us
-        let tx_time_us = (frame.len() as u64) * 260 + 100; // Add 100us margin
+        // For time-critical frames (ReplyToPollForMaster), use minimal margin
+        // For other frames, add more margin to ensure transceiver settles
+        let extra_margin_us = if is_reply_to_poll { 200 } else { 2000 };
+        let tx_time_us = (frame.len() as u64) * 260 + extra_margin_us;
         std::thread::sleep(std::time::Duration::from_micros(tx_time_us));
+
+        // Note: M5Stack RS-485 HAT uses SP485EEN with automatic direction control
+        // This chip should NOT echo our TX back to RX (DE/RE tied together, controlled by TX)
+        // However, some RS-485 transceivers do echo. Let's be conservative and only
+        // discard bytes received DURING our transmission window, not clear rx_buffer
+        // which might contain the start of a legitimate frame from another station.
+
+        // Previously we flushed bytes after TX assuming they were echo.
+        // However, the SP485EEN chip on M5Stack RS-485 HAT has automatic direction
+        // control and does NOT echo TX back to RX. Any bytes in the UART buffer
+        // after transmission are likely the START of a frame from another station
+        // that began transmitting immediately after we finished.
+        //
+        // DO NOT flush these bytes - they should be processed normally.
+        // If we were getting echo, we'd see our own frame in the rx_buffer and
+        // could filter it out based on matching our TX (but we're not echoing).
+        //
+        // Read ALL bytes that arrived during our TX - these might be the start
+        // of a frame from another station responding to us or transmitting
+        let mut rx_buf = [0u8; 256];
+        let mut total_received = 0usize;
+        loop {
+            match self.uart.read(&mut rx_buf, 0) {
+                Ok(0) => break,
+                Ok(n) => {
+                    self.rx_buffer.extend_from_slice(&rx_buf[..n]);
+                    total_received += n;
+                    self.silence_timer = Instant::now();
+                }
+                Err(_) => break,
+            }
+        }
+        if total_received > 0 {
+            info!("RX during/after TX: {} total bytes", total_received);
+
+            // CRITICAL FIX: Filter TX echo if present
+            // Despite docs claiming SP485EEN doesn't echo, we're seeing our own transmissions
+            // This causes the router to think our tokens are lost, creating duplicate tokens
+            if self.rx_buffer.len() >= tx_frame_copy.len() {
+                // Check if start of rx_buffer matches our TX frame
+                if &self.rx_buffer[..tx_frame_copy.len()] == tx_frame_copy.as_slice() {
+                    warn!("TX ECHO DETECTED! Filtering {} bytes from rx_buffer", tx_frame_copy.len());
+                    warn!("Echo frame: {:02X?}", &tx_frame_copy[..tx_frame_copy.len().min(20)]);
+                    self.rx_buffer.drain(..tx_frame_copy.len());
+                    total_received -= tx_frame_copy.len();
+                    if total_received > 0 {
+                        info!("Remaining valid RX after echo removal: {} bytes", total_received);
+                    }
+                }
+            }
+        }
+        // rx_buffer now contains only legitimate frames from other stations
 
         self.silence_timer = Instant::now();
         self.tx_frame_count += 1;
@@ -868,6 +1112,21 @@ impl<'a> MstpDriver<'a> {
     /// Get frame statistics (rx_count, tx_count)
     pub fn get_frame_stats(&self) -> (u64, u64) {
         (self.rx_frame_count, self.tx_frame_count)
+    }
+
+    /// Find the next master station after us in the token ring
+    /// Uses the discovered_masters bitmap to find the correct next station
+    fn find_next_master(&self) -> u8 {
+        // Search from our address + 1 to max_master, then wrap around from 0
+        // Skip ourselves
+        for offset in 1..=self.max_master as u16 {
+            let addr = ((self.station_address as u16 + offset) % (self.max_master as u16 + 1)) as u8;
+            if addr != self.station_address && (self.discovered_masters & (1u128 << addr)) != 0 {
+                return addr;
+            }
+        }
+        // No other masters discovered - return address after us (will be polled)
+        (self.station_address + 1) % (self.max_master + 1)
     }
 
     /// Get comprehensive MS/TP statistics
@@ -1020,19 +1279,20 @@ fn calculate_header_crc(header: &[u8]) -> u8 {
     !crc
 }
 
-/// Calculate MS/TP data CRC (16-bit)
+/// Calculate MS/TP data CRC-16 per ASHRAE 135 Annex G.2
+/// Uses CRC-CCITT polynomial: x^16 + x^12 + x^5 + 1 (reflected form: 0x8408)
+/// NOT the same as MODBUS/CRC-16-IBM (0xA001)!
 fn calculate_data_crc(data: &[u8]) -> u16 {
     let mut crc = 0xFFFFu16;
 
     for &byte in data {
-        let mut byte = byte;
+        crc ^= byte as u16;
         for _ in 0..8 {
-            let bit = (byte ^ (crc as u8)) & 0x01;
-            crc >>= 1;
-            if bit != 0 {
-                crc ^= 0xA001;
+            if crc & 0x0001 != 0 {
+                crc = (crc >> 1) ^ 0x8408;  // CRC-CCITT reflected polynomial
+            } else {
+                crc >>= 1;
             }
-            byte >>= 1;
         }
     }
 

@@ -328,7 +328,34 @@ impl BacnetObject for BinaryInput {
             PropertyIdentifier::PresentValue => {
                 Ok(PropertyValue::Enumerated(self.present_value as u32))
             }
+            PropertyIdentifier::Description => {
+                Ok(PropertyValue::CharacterString(self.description.clone()))
+            }
+            PropertyIdentifier::StatusFlags => {
+                // StatusFlags is a BIT STRING of 4 bits: {in-alarm, fault, overridden, out-of-service}
+                Ok(PropertyValue::BitString(vec![
+                    (self.status_flags & 0x08) != 0, // in-alarm
+                    (self.status_flags & 0x04) != 0, // fault
+                    (self.status_flags & 0x02) != 0, // overridden
+                    (self.status_flags & 0x01) != 0, // out-of-service
+                ]))
+            }
+            PropertyIdentifier::EventState => {
+                Ok(PropertyValue::Enumerated(self.event_state as u32))
+            }
+            PropertyIdentifier::Reliability => {
+                Ok(PropertyValue::Enumerated(self.reliability as u32))
+            }
             PropertyIdentifier::OutOfService => Ok(PropertyValue::Boolean(self.out_of_service)),
+            PropertyIdentifier::Polarity => {
+                Ok(PropertyValue::Enumerated(self.polarity as u32))
+            }
+            PropertyIdentifier::InactiveText => {
+                Ok(PropertyValue::CharacterString(self.inactive_text.clone()))
+            }
+            PropertyIdentifier::ActiveText => {
+                Ok(PropertyValue::CharacterString(self.active_text.clone()))
+            }
             _ => Err(ObjectError::UnknownProperty),
         }
     }
@@ -368,7 +395,14 @@ impl BacnetObject for BinaryInput {
             PropertyIdentifier::ObjectName,
             PropertyIdentifier::ObjectType,
             PropertyIdentifier::PresentValue,
+            PropertyIdentifier::Description,
+            PropertyIdentifier::StatusFlags,
+            PropertyIdentifier::EventState,
+            PropertyIdentifier::Reliability,
             PropertyIdentifier::OutOfService,
+            PropertyIdentifier::Polarity,
+            PropertyIdentifier::InactiveText,
+            PropertyIdentifier::ActiveText,
         ]
     }
 }
@@ -392,7 +426,34 @@ impl BacnetObject for BinaryOutput {
             PropertyIdentifier::PresentValue => {
                 Ok(PropertyValue::Enumerated(self.present_value as u32))
             }
+            PropertyIdentifier::Description => {
+                Ok(PropertyValue::CharacterString(self.description.clone()))
+            }
+            PropertyIdentifier::StatusFlags => {
+                // StatusFlags is a BIT STRING of 4 bits: {in-alarm, fault, overridden, out-of-service}
+                Ok(PropertyValue::BitString(vec![
+                    (self.status_flags & 0x08) != 0, // in-alarm
+                    (self.status_flags & 0x04) != 0, // fault
+                    (self.status_flags & 0x02) != 0, // overridden
+                    (self.status_flags & 0x01) != 0, // out-of-service
+                ]))
+            }
+            PropertyIdentifier::EventState => {
+                Ok(PropertyValue::Enumerated(self.event_state as u32))
+            }
+            PropertyIdentifier::Reliability => {
+                Ok(PropertyValue::Enumerated(self.reliability as u32))
+            }
             PropertyIdentifier::OutOfService => Ok(PropertyValue::Boolean(self.out_of_service)),
+            PropertyIdentifier::Polarity => {
+                Ok(PropertyValue::Enumerated(self.polarity as u32))
+            }
+            PropertyIdentifier::InactiveText => {
+                Ok(PropertyValue::CharacterString(self.inactive_text.clone()))
+            }
+            PropertyIdentifier::ActiveText => {
+                Ok(PropertyValue::CharacterString(self.active_text.clone()))
+            }
             PropertyIdentifier::PriorityArray => {
                 let array: Vec<PropertyValue> = self
                     .priority_array
@@ -403,6 +464,9 @@ impl BacnetObject for BinaryOutput {
                     })
                     .collect();
                 Ok(PropertyValue::Array(array))
+            }
+            PropertyIdentifier::RelinquishDefault => {
+                Ok(PropertyValue::Enumerated(self.relinquish_default as u32))
             }
             _ => Err(ObjectError::UnknownProperty),
         }
@@ -443,6 +507,22 @@ impl BacnetObject for BinaryOutput {
                     Err(ObjectError::InvalidPropertyType)
                 }
             }
+            PropertyIdentifier::RelinquishDefault => {
+                if let PropertyValue::Enumerated(val) = value {
+                    self.relinquish_default = match val {
+                        0 => BinaryPV::Inactive,
+                        1 => BinaryPV::Active,
+                        _ => {
+                            return Err(ObjectError::InvalidValue(
+                                "Binary value must be 0 or 1".to_string(),
+                            ))
+                        }
+                    };
+                    Ok(())
+                } else {
+                    Err(ObjectError::InvalidPropertyType)
+                }
+            }
             _ => Err(ObjectError::PropertyNotWritable),
         }
     }
@@ -453,6 +533,7 @@ impl BacnetObject for BinaryOutput {
             PropertyIdentifier::ObjectName
                 | PropertyIdentifier::PresentValue
                 | PropertyIdentifier::OutOfService
+                | PropertyIdentifier::RelinquishDefault
         )
     }
 
@@ -462,8 +543,16 @@ impl BacnetObject for BinaryOutput {
             PropertyIdentifier::ObjectName,
             PropertyIdentifier::ObjectType,
             PropertyIdentifier::PresentValue,
+            PropertyIdentifier::Description,
+            PropertyIdentifier::StatusFlags,
+            PropertyIdentifier::EventState,
+            PropertyIdentifier::Reliability,
             PropertyIdentifier::OutOfService,
+            PropertyIdentifier::Polarity,
+            PropertyIdentifier::InactiveText,
+            PropertyIdentifier::ActiveText,
             PropertyIdentifier::PriorityArray,
+            PropertyIdentifier::RelinquishDefault,
         ]
     }
 }
@@ -487,7 +576,31 @@ impl BacnetObject for BinaryValue {
             PropertyIdentifier::PresentValue => {
                 Ok(PropertyValue::Enumerated(self.present_value as u32))
             }
+            PropertyIdentifier::Description => {
+                Ok(PropertyValue::CharacterString(self.description.clone()))
+            }
+            PropertyIdentifier::StatusFlags => {
+                // StatusFlags is a BIT STRING of 4 bits: {in-alarm, fault, overridden, out-of-service}
+                Ok(PropertyValue::BitString(vec![
+                    (self.status_flags & 0x08) != 0, // in-alarm
+                    (self.status_flags & 0x04) != 0, // fault
+                    (self.status_flags & 0x02) != 0, // overridden
+                    (self.status_flags & 0x01) != 0, // out-of-service
+                ]))
+            }
+            PropertyIdentifier::EventState => {
+                Ok(PropertyValue::Enumerated(self.event_state as u32))
+            }
+            PropertyIdentifier::Reliability => {
+                Ok(PropertyValue::Enumerated(self.reliability as u32))
+            }
             PropertyIdentifier::OutOfService => Ok(PropertyValue::Boolean(self.out_of_service)),
+            PropertyIdentifier::InactiveText => {
+                Ok(PropertyValue::CharacterString(self.inactive_text.clone()))
+            }
+            PropertyIdentifier::ActiveText => {
+                Ok(PropertyValue::CharacterString(self.active_text.clone()))
+            }
             PropertyIdentifier::PriorityArray => {
                 let array: Vec<PropertyValue> = self
                     .priority_array
@@ -498,6 +611,9 @@ impl BacnetObject for BinaryValue {
                     })
                     .collect();
                 Ok(PropertyValue::Array(array))
+            }
+            PropertyIdentifier::RelinquishDefault => {
+                Ok(PropertyValue::Enumerated(self.relinquish_default as u32))
             }
             _ => Err(ObjectError::UnknownProperty),
         }
@@ -538,6 +654,22 @@ impl BacnetObject for BinaryValue {
                     Err(ObjectError::InvalidPropertyType)
                 }
             }
+            PropertyIdentifier::RelinquishDefault => {
+                if let PropertyValue::Enumerated(val) = value {
+                    self.relinquish_default = match val {
+                        0 => BinaryPV::Inactive,
+                        1 => BinaryPV::Active,
+                        _ => {
+                            return Err(ObjectError::InvalidValue(
+                                "Binary value must be 0 or 1".to_string(),
+                            ))
+                        }
+                    };
+                    Ok(())
+                } else {
+                    Err(ObjectError::InvalidPropertyType)
+                }
+            }
             _ => Err(ObjectError::PropertyNotWritable),
         }
     }
@@ -548,6 +680,7 @@ impl BacnetObject for BinaryValue {
             PropertyIdentifier::ObjectName
                 | PropertyIdentifier::PresentValue
                 | PropertyIdentifier::OutOfService
+                | PropertyIdentifier::RelinquishDefault
         )
     }
 
@@ -557,8 +690,15 @@ impl BacnetObject for BinaryValue {
             PropertyIdentifier::ObjectName,
             PropertyIdentifier::ObjectType,
             PropertyIdentifier::PresentValue,
+            PropertyIdentifier::Description,
+            PropertyIdentifier::StatusFlags,
+            PropertyIdentifier::EventState,
+            PropertyIdentifier::Reliability,
             PropertyIdentifier::OutOfService,
+            PropertyIdentifier::InactiveText,
+            PropertyIdentifier::ActiveText,
             PropertyIdentifier::PriorityArray,
+            PropertyIdentifier::RelinquishDefault,
         ]
     }
 }

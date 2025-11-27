@@ -192,6 +192,8 @@ pub enum ServiceError {
     Rejected(RejectReason),
     /// Service aborted by remote device
     Aborted(AbortReason),
+    /// BACnet error response from device (ASHRAE 135 Clause 18)
+    BacnetError(BacnetError),
     /// Encoding/decoding error
     EncodingError(String),
     /// Unsupported service choice
@@ -206,6 +208,7 @@ impl fmt::Display for ServiceError {
             ServiceError::Timeout => write!(f, "Service timeout"),
             ServiceError::Rejected(reason) => write!(f, "Service rejected: {:?}", reason),
             ServiceError::Aborted(reason) => write!(f, "Service aborted: {:?}", reason),
+            ServiceError::BacnetError(err) => write!(f, "BACnet error: {}", err),
             ServiceError::EncodingError(msg) => write!(f, "Encoding error: {}", msg),
             ServiceError::UnsupportedServiceChoice(choice) => {
                 write!(f, "Unsupported service choice: {}", choice)
@@ -368,6 +371,385 @@ pub enum AbortReason {
     InvalidApduInThisState = 2,
     PreemptedByHigherPriorityTask = 3,
     SegmentationNotSupported = 4,
+}
+
+/// BACnet Error Class (ASHRAE 135-2024 Clause 18)
+///
+/// Error classes categorize the type of error that occurred during service execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ErrorClass {
+    /// Device-related errors (Clause 18.1)
+    Device = 0,
+    /// Object-related errors (Clause 18.2)
+    Object = 1,
+    /// Property-related errors (Clause 18.3)
+    Property = 2,
+    /// Resource-related errors (Clause 18.4)
+    Resources = 3,
+    /// Security-related errors (Clause 18.5)
+    Security = 4,
+    /// Service-related errors (Clause 18.6)
+    Services = 5,
+    /// Virtual Terminal errors (Clause 18.8)
+    Vt = 6,
+    /// Communication-related errors (Clause 18.7)
+    Communication = 7,
+}
+
+impl ErrorClass {
+    /// Create an ErrorClass from a u8 value
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(ErrorClass::Device),
+            1 => Some(ErrorClass::Object),
+            2 => Some(ErrorClass::Property),
+            3 => Some(ErrorClass::Resources),
+            4 => Some(ErrorClass::Security),
+            5 => Some(ErrorClass::Services),
+            6 => Some(ErrorClass::Vt),
+            7 => Some(ErrorClass::Communication),
+            _ => None,
+        }
+    }
+}
+
+/// BACnet Error Code (ASHRAE 135-2024 Clause 18)
+///
+/// Error codes provide specific details about what went wrong during service execution.
+/// The error code should be interpreted in context of its error class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum ErrorCode {
+    // General error codes (used across multiple classes)
+    Other = 0,
+
+    // Device class errors (Clause 18.1)
+    DeviceBusy = 3,
+    ConfigurationInProgress = 2,
+    OperationalProblem = 25,
+
+    // Object class errors (Clause 18.2)
+    DynamicCreationNotSupported = 4,
+    NoObjectsOfSpecifiedType = 17,
+    ObjectDeletionNotPermitted = 23,
+    ObjectIdentifierAlreadyExists = 24,
+    UnknownObject = 31,
+    UnsupportedObjectType = 36,
+
+    // Property class errors (Clause 18.3)
+    CharacterSetNotSupported = 41,
+    DatatypeNotSupported = 47,
+    InconsistentSelectionCriterion = 8,
+    InvalidArrayIndex = 42,
+    InvalidDataType = 9,
+    NotCovProperty = 44,
+    OptionalFunctionalityNotSupported = 45,
+    PropertyIsNotAnArray = 50,
+    ReadAccessDenied = 27,
+    UnknownProperty = 32,
+    ValueOutOfRange = 37,
+    WriteAccessDenied = 40,
+    ListElementNotFound = 81,
+    InvalidConfigurationData = 46,
+
+    // Resources class errors (Clause 18.4)
+    NoSpaceForObject = 18,
+    NoSpaceToAddListElement = 19,
+    NoSpaceToWriteProperty = 20,
+
+    // Security class errors (Clause 18.5)
+    AuthenticationFailed = 1,
+    NotConfigured = 132,
+    PasswordFailure = 26,
+    SecurityNotSupported = 82,
+
+    // Services class errors (Clause 18.6)
+    CovSubscriptionFailed = 43,
+    DuplicateName = 48,
+    FileAccessDenied = 5,
+    InconsistentParameters = 7,
+    InvalidFileAccessMethod = 10,
+    InvalidFileStartPosition = 11,
+    InvalidParameterDataType = 13,
+    InvalidTimeStamp = 14,
+    MissingRequiredParameter = 16,
+    ParameterOutOfRange = 80,
+    ServiceRequestDenied = 29,
+
+    // Communication class errors (Clause 18.7)
+    Abort = 51,
+    AbortBufferOverflow = 52,
+    AbortInvalidApduInThisState = 53,
+    AbortPreemptedByHigherPriorityTask = 54,
+    AbortSegmentationNotSupported = 55,
+    AbortProprietary = 56,
+    AbortOther = 57,
+    InvalidTag = 58,
+    NetworkDown = 59,
+    RejectBufferOverflow = 60,
+    RejectInconsistentParameters = 61,
+    RejectInvalidParameterDataType = 62,
+    RejectInvalidTag = 63,
+    RejectMissingRequiredParameter = 64,
+    RejectParameterOutOfRange = 65,
+    RejectTooManyArguments = 66,
+    RejectUndefinedEnumeration = 67,
+    RejectUnrecognizedService = 68,
+    RejectProprietary = 69,
+    RejectOther = 70,
+    UnknownDevice = 71,
+    Timeout = 30,
+    MessageIncomplete = 135,
+    HeaderEncodingError = 136,
+    HeaderNotUnderstood = 137,
+    PayloadExpected = 138,
+    UnexpectedData = 139,
+    NodeDuplicateVmac = 140,
+    HttpUnexpectedResponseCode = 141,
+    HttpNoUpgrade = 142,
+    HttpResourceNotLocal = 143,
+    HttpProxyAuthenticationFailed = 144,
+    HttpResponseTimeout = 145,
+    HttpResponseSyntaxError = 146,
+    HttpResponseValueError = 147,
+    HttpResponseMissingHeader = 148,
+    HttpWebsocketHeaderError = 149,
+    HttpUpgradeRequired = 150,
+    HttpUpgradeError = 151,
+    HttpTemporaryUnavailable = 152,
+    HttpNotAServer = 153,
+    HttpError = 154,
+    WebsocketSchemeNotSupported = 155,
+    WebsocketUnknownControlMessage = 156,
+    WebsocketCloseError = 157,
+    WebsocketClosedByPeer = 158,
+    WebsocketEndpointLeaves = 159,
+    WebsocketProtocolError = 160,
+    WebsocketDataNotAccepted = 161,
+    WebsocketClosedAbnormally = 162,
+    BvlcFunctionUnknown = 76,
+    BvlcProprietaryFunctionUnknown = 77,
+
+    // VT class errors (Clause 18.8)
+    UnknownVtClass = 34,
+    UnknownVtSession = 35,
+    NoVtSessionsAvailable = 21,
+    VtSessionAlreadyClosed = 38,
+    VtSessionTerminationFailure = 39,
+}
+
+impl ErrorCode {
+    /// Create an ErrorCode from a u16 value
+    pub fn from_u16(value: u16) -> Option<Self> {
+        match value {
+            0 => Some(ErrorCode::Other),
+            1 => Some(ErrorCode::AuthenticationFailed),
+            2 => Some(ErrorCode::ConfigurationInProgress),
+            3 => Some(ErrorCode::DeviceBusy),
+            4 => Some(ErrorCode::DynamicCreationNotSupported),
+            5 => Some(ErrorCode::FileAccessDenied),
+            7 => Some(ErrorCode::InconsistentParameters),
+            8 => Some(ErrorCode::InconsistentSelectionCriterion),
+            9 => Some(ErrorCode::InvalidDataType),
+            10 => Some(ErrorCode::InvalidFileAccessMethod),
+            11 => Some(ErrorCode::InvalidFileStartPosition),
+            13 => Some(ErrorCode::InvalidParameterDataType),
+            14 => Some(ErrorCode::InvalidTimeStamp),
+            16 => Some(ErrorCode::MissingRequiredParameter),
+            17 => Some(ErrorCode::NoObjectsOfSpecifiedType),
+            18 => Some(ErrorCode::NoSpaceForObject),
+            19 => Some(ErrorCode::NoSpaceToAddListElement),
+            20 => Some(ErrorCode::NoSpaceToWriteProperty),
+            21 => Some(ErrorCode::NoVtSessionsAvailable),
+            23 => Some(ErrorCode::ObjectDeletionNotPermitted),
+            24 => Some(ErrorCode::ObjectIdentifierAlreadyExists),
+            25 => Some(ErrorCode::OperationalProblem),
+            26 => Some(ErrorCode::PasswordFailure),
+            27 => Some(ErrorCode::ReadAccessDenied),
+            29 => Some(ErrorCode::ServiceRequestDenied),
+            30 => Some(ErrorCode::Timeout),
+            31 => Some(ErrorCode::UnknownObject),
+            32 => Some(ErrorCode::UnknownProperty),
+            34 => Some(ErrorCode::UnknownVtClass),
+            35 => Some(ErrorCode::UnknownVtSession),
+            36 => Some(ErrorCode::UnsupportedObjectType),
+            37 => Some(ErrorCode::ValueOutOfRange),
+            38 => Some(ErrorCode::VtSessionAlreadyClosed),
+            39 => Some(ErrorCode::VtSessionTerminationFailure),
+            40 => Some(ErrorCode::WriteAccessDenied),
+            41 => Some(ErrorCode::CharacterSetNotSupported),
+            42 => Some(ErrorCode::InvalidArrayIndex),
+            43 => Some(ErrorCode::CovSubscriptionFailed),
+            44 => Some(ErrorCode::NotCovProperty),
+            45 => Some(ErrorCode::OptionalFunctionalityNotSupported),
+            46 => Some(ErrorCode::InvalidConfigurationData),
+            47 => Some(ErrorCode::DatatypeNotSupported),
+            48 => Some(ErrorCode::DuplicateName),
+            50 => Some(ErrorCode::PropertyIsNotAnArray),
+            51 => Some(ErrorCode::Abort),
+            52 => Some(ErrorCode::AbortBufferOverflow),
+            53 => Some(ErrorCode::AbortInvalidApduInThisState),
+            54 => Some(ErrorCode::AbortPreemptedByHigherPriorityTask),
+            55 => Some(ErrorCode::AbortSegmentationNotSupported),
+            56 => Some(ErrorCode::AbortProprietary),
+            57 => Some(ErrorCode::AbortOther),
+            58 => Some(ErrorCode::InvalidTag),
+            59 => Some(ErrorCode::NetworkDown),
+            60 => Some(ErrorCode::RejectBufferOverflow),
+            61 => Some(ErrorCode::RejectInconsistentParameters),
+            62 => Some(ErrorCode::RejectInvalidParameterDataType),
+            63 => Some(ErrorCode::RejectInvalidTag),
+            64 => Some(ErrorCode::RejectMissingRequiredParameter),
+            65 => Some(ErrorCode::RejectParameterOutOfRange),
+            66 => Some(ErrorCode::RejectTooManyArguments),
+            67 => Some(ErrorCode::RejectUndefinedEnumeration),
+            68 => Some(ErrorCode::RejectUnrecognizedService),
+            69 => Some(ErrorCode::RejectProprietary),
+            70 => Some(ErrorCode::RejectOther),
+            71 => Some(ErrorCode::UnknownDevice),
+            76 => Some(ErrorCode::BvlcFunctionUnknown),
+            77 => Some(ErrorCode::BvlcProprietaryFunctionUnknown),
+            80 => Some(ErrorCode::ParameterOutOfRange),
+            81 => Some(ErrorCode::ListElementNotFound),
+            82 => Some(ErrorCode::SecurityNotSupported),
+            132 => Some(ErrorCode::NotConfigured),
+            135 => Some(ErrorCode::MessageIncomplete),
+            136 => Some(ErrorCode::HeaderEncodingError),
+            137 => Some(ErrorCode::HeaderNotUnderstood),
+            138 => Some(ErrorCode::PayloadExpected),
+            139 => Some(ErrorCode::UnexpectedData),
+            140 => Some(ErrorCode::NodeDuplicateVmac),
+            141 => Some(ErrorCode::HttpUnexpectedResponseCode),
+            142 => Some(ErrorCode::HttpNoUpgrade),
+            143 => Some(ErrorCode::HttpResourceNotLocal),
+            144 => Some(ErrorCode::HttpProxyAuthenticationFailed),
+            145 => Some(ErrorCode::HttpResponseTimeout),
+            146 => Some(ErrorCode::HttpResponseSyntaxError),
+            147 => Some(ErrorCode::HttpResponseValueError),
+            148 => Some(ErrorCode::HttpResponseMissingHeader),
+            149 => Some(ErrorCode::HttpWebsocketHeaderError),
+            150 => Some(ErrorCode::HttpUpgradeRequired),
+            151 => Some(ErrorCode::HttpUpgradeError),
+            152 => Some(ErrorCode::HttpTemporaryUnavailable),
+            153 => Some(ErrorCode::HttpNotAServer),
+            154 => Some(ErrorCode::HttpError),
+            155 => Some(ErrorCode::WebsocketSchemeNotSupported),
+            156 => Some(ErrorCode::WebsocketUnknownControlMessage),
+            157 => Some(ErrorCode::WebsocketCloseError),
+            158 => Some(ErrorCode::WebsocketClosedByPeer),
+            159 => Some(ErrorCode::WebsocketEndpointLeaves),
+            160 => Some(ErrorCode::WebsocketProtocolError),
+            161 => Some(ErrorCode::WebsocketDataNotAccepted),
+            162 => Some(ErrorCode::WebsocketClosedAbnormally),
+            _ => None,
+        }
+    }
+}
+
+/// BACnet Error response structure
+///
+/// Represents a complete error response with both class and code as defined
+/// in ASHRAE 135-2024 Clause 18.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BacnetError {
+    /// The error class (category of error)
+    pub error_class: ErrorClass,
+    /// The specific error code
+    pub error_code: ErrorCode,
+}
+
+impl BacnetError {
+    /// Create a new BACnet error
+    pub fn new(error_class: ErrorClass, error_code: ErrorCode) -> Self {
+        Self {
+            error_class,
+            error_code,
+        }
+    }
+
+    /// Create an "unknown object" error
+    pub fn unknown_object() -> Self {
+        Self::new(ErrorClass::Object, ErrorCode::UnknownObject)
+    }
+
+    /// Create an "unknown property" error
+    pub fn unknown_property() -> Self {
+        Self::new(ErrorClass::Property, ErrorCode::UnknownProperty)
+    }
+
+    /// Create a "read access denied" error
+    pub fn read_access_denied() -> Self {
+        Self::new(ErrorClass::Property, ErrorCode::ReadAccessDenied)
+    }
+
+    /// Create a "write access denied" error
+    pub fn write_access_denied() -> Self {
+        Self::new(ErrorClass::Property, ErrorCode::WriteAccessDenied)
+    }
+
+    /// Create a "value out of range" error
+    pub fn value_out_of_range() -> Self {
+        Self::new(ErrorClass::Property, ErrorCode::ValueOutOfRange)
+    }
+
+    /// Create a "device busy" error
+    pub fn device_busy() -> Self {
+        Self::new(ErrorClass::Device, ErrorCode::DeviceBusy)
+    }
+
+    /// Create a "service request denied" error
+    pub fn service_request_denied() -> Self {
+        Self::new(ErrorClass::Services, ErrorCode::ServiceRequestDenied)
+    }
+
+    /// Create a "timeout" error
+    pub fn timeout() -> Self {
+        Self::new(ErrorClass::Communication, ErrorCode::Timeout)
+    }
+
+    /// Create an "invalid array index" error
+    pub fn invalid_array_index() -> Self {
+        Self::new(ErrorClass::Property, ErrorCode::InvalidArrayIndex)
+    }
+
+    /// Create an "unsupported object type" error
+    pub fn unsupported_object_type() -> Self {
+        Self::new(ErrorClass::Object, ErrorCode::UnsupportedObjectType)
+    }
+
+    /// Encode this error to bytes
+    pub fn encode(&self, buf: &mut Vec<u8>) {
+        // Error-PDU contains: [0] error-class, [1] error-code
+        if let Ok(class_bytes) = encode_context_enumerated(self.error_class as u32, 0) {
+            buf.extend_from_slice(&class_bytes);
+        }
+        if let Ok(code_bytes) = encode_context_enumerated(self.error_code as u32, 1) {
+            buf.extend_from_slice(&code_bytes);
+        }
+    }
+
+    /// Decode an error from bytes
+    pub fn decode(data: &[u8]) -> Option<Self> {
+        let mut pos = 0;
+
+        // Decode error-class [0]
+        let (class_val, consumed) = decode_context_enumerated(data, 0).ok()?;
+        pos += consumed;
+        let error_class = ErrorClass::from_u8(class_val as u8)?;
+
+        // Decode error-code [1]
+        let (code_val, _) = decode_context_enumerated(&data[pos..], 1).ok()?;
+        let error_code = ErrorCode::from_u16(code_val as u16)?;
+
+        Some(Self::new(error_class, error_code))
+    }
+}
+
+impl fmt::Display for BacnetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}: {:?}", self.error_class, self.error_code)
+    }
 }
 
 use crate::encoding::{

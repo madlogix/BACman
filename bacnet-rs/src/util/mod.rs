@@ -1771,12 +1771,12 @@ mod tests {
 
         // Maximum valid object type (10 bits = 1023)
         let encoded = encode_object_id(0x3FF, 0).unwrap();
-        let (obj_type, instance) = decode_object_id(encoded);
+        let (obj_type, _instance) = decode_object_id(encoded);
         assert_eq!(obj_type, 0x3FF);
 
         // Maximum valid instance (22 bits = 4194303)
         let encoded = encode_object_id(0, 0x3FFFFF).unwrap();
-        let (obj_type, instance) = decode_object_id(encoded);
+        let (_obj_type, instance) = decode_object_id(encoded);
         assert_eq!(instance, 0x3FFFFF);
 
         // Maximum both

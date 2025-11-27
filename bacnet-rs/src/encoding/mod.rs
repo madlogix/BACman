@@ -296,6 +296,100 @@ pub fn decode_boolean(data: &[u8]) -> Result<(bool, usize)> {
     Ok((value, consumed))
 }
 
+/// Encode a BACnet Null value
+///
+/// Null is used in BACnet to represent "no value" or "absent value".
+/// Per ASHRAE 135, Null has tag number 0 and length 0.
+pub fn encode_null(buffer: &mut Vec<u8>) -> Result<()> {
+    // Null is application tag 0 with length 0
+    encode_application_tag(buffer, ApplicationTag::Null, 0)?;
+    Ok(())
+}
+
+/// Decode a BACnet Null value
+///
+/// Returns the number of bytes consumed if successful.
+pub fn decode_null(data: &[u8]) -> Result<usize> {
+    let (tag, length, consumed) = decode_application_tag(data)?;
+
+    if tag != ApplicationTag::Null {
+        return Err(EncodingError::InvalidTag);
+    }
+
+    if length != 0 {
+        return Err(EncodingError::InvalidLength);
+    }
+
+    Ok(consumed)
+}
+
+/// Check if the data starts with a Null value
+pub fn is_null(data: &[u8]) -> bool {
+    if data.is_empty() {
+        return false;
+    }
+    // Null is encoded as a single byte: 0x00 (application tag 0, length 0)
+    data[0] == 0x00
+}
+
+/// Encode a context-tagged Null value
+///
+/// Context-tagged Null is used in some service responses (e.g., optional property values).
+pub fn encode_context_null(buffer: &mut Vec<u8>, tag_number: u8) -> Result<()> {
+    if tag_number > 14 {
+        // Extended tag
+        buffer.push(0x08 | 0xF0); // Context class bit + extended tag indicator
+        buffer.push(tag_number);
+    } else {
+        // Tag number in first octet
+        buffer.push(0x08 | (tag_number << 4)); // Context class bit + tag number
+    }
+    Ok(())
+}
+
+/// Decode a context-tagged Null value
+///
+/// Returns the number of bytes consumed if successful.
+pub fn decode_context_null(data: &[u8], expected_tag: u8) -> Result<usize> {
+    if data.is_empty() {
+        return Err(EncodingError::BufferUnderflow);
+    }
+
+    let first_byte = data[0];
+
+    // Check context class bit (bit 3)
+    if (first_byte & 0x08) == 0 {
+        return Err(EncodingError::InvalidTag);
+    }
+
+    // Extract tag number and check length/value bits indicate zero length
+    let tag_number;
+    let consumed;
+
+    if (first_byte & 0xF0) == 0xF0 {
+        // Extended tag number
+        if data.len() < 2 {
+            return Err(EncodingError::BufferUnderflow);
+        }
+        tag_number = data[1];
+        consumed = 2;
+    } else {
+        tag_number = (first_byte >> 4) & 0x0F;
+        consumed = 1;
+    }
+
+    // Length/value bits should be 0 for null (bits 0-2)
+    if (first_byte & 0x07) != 0 {
+        return Err(EncodingError::InvalidLength);
+    }
+
+    if tag_number != expected_tag {
+        return Err(EncodingError::InvalidTag);
+    }
+
+    Ok(consumed)
+}
+
 /// Encode a BACnet unsigned integer
 pub fn encode_unsigned(buffer: &mut Vec<u8>, value: u32) -> Result<()> {
     let bytes = if value == 0 {

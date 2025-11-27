@@ -301,7 +301,36 @@ impl BacnetObject for MultiStateInput {
             PropertyIdentifier::PresentValue => {
                 Ok(PropertyValue::UnsignedInteger(self.present_value))
             }
+            PropertyIdentifier::Description => {
+                Ok(PropertyValue::CharacterString(self.description.clone()))
+            }
+            PropertyIdentifier::StatusFlags => {
+                // StatusFlags is a BIT STRING of 4 bits: {in-alarm, fault, overridden, out-of-service}
+                Ok(PropertyValue::BitString(vec![
+                    (self.status_flags & 0x08) != 0, // in-alarm
+                    (self.status_flags & 0x04) != 0, // fault
+                    (self.status_flags & 0x02) != 0, // overridden
+                    (self.status_flags & 0x01) != 0, // out-of-service
+                ]))
+            }
+            PropertyIdentifier::EventState => {
+                Ok(PropertyValue::Enumerated(self.event_state as u32))
+            }
+            PropertyIdentifier::Reliability => {
+                Ok(PropertyValue::Enumerated(self.reliability as u32))
+            }
             PropertyIdentifier::OutOfService => Ok(PropertyValue::Boolean(self.out_of_service)),
+            PropertyIdentifier::NumberOfStates => {
+                Ok(PropertyValue::UnsignedInteger(self.number_of_states))
+            }
+            PropertyIdentifier::StateText => {
+                let array: Vec<PropertyValue> = self
+                    .state_text
+                    .iter()
+                    .map(|s| PropertyValue::CharacterString(s.clone()))
+                    .collect();
+                Ok(PropertyValue::Array(array))
+            }
             _ => Err(ObjectError::UnknownProperty),
         }
     }
@@ -341,7 +370,13 @@ impl BacnetObject for MultiStateInput {
             PropertyIdentifier::ObjectName,
             PropertyIdentifier::ObjectType,
             PropertyIdentifier::PresentValue,
+            PropertyIdentifier::Description,
+            PropertyIdentifier::StatusFlags,
+            PropertyIdentifier::EventState,
+            PropertyIdentifier::Reliability,
             PropertyIdentifier::OutOfService,
+            PropertyIdentifier::NumberOfStates,
+            PropertyIdentifier::StateText,
         ]
     }
 }
@@ -365,7 +400,36 @@ impl BacnetObject for MultiStateOutput {
             PropertyIdentifier::PresentValue => {
                 Ok(PropertyValue::UnsignedInteger(self.present_value))
             }
+            PropertyIdentifier::Description => {
+                Ok(PropertyValue::CharacterString(self.description.clone()))
+            }
+            PropertyIdentifier::StatusFlags => {
+                // StatusFlags is a BIT STRING of 4 bits: {in-alarm, fault, overridden, out-of-service}
+                Ok(PropertyValue::BitString(vec![
+                    (self.status_flags & 0x08) != 0, // in-alarm
+                    (self.status_flags & 0x04) != 0, // fault
+                    (self.status_flags & 0x02) != 0, // overridden
+                    (self.status_flags & 0x01) != 0, // out-of-service
+                ]))
+            }
+            PropertyIdentifier::EventState => {
+                Ok(PropertyValue::Enumerated(self.event_state as u32))
+            }
+            PropertyIdentifier::Reliability => {
+                Ok(PropertyValue::Enumerated(self.reliability as u32))
+            }
             PropertyIdentifier::OutOfService => Ok(PropertyValue::Boolean(self.out_of_service)),
+            PropertyIdentifier::NumberOfStates => {
+                Ok(PropertyValue::UnsignedInteger(self.number_of_states))
+            }
+            PropertyIdentifier::StateText => {
+                let array: Vec<PropertyValue> = self
+                    .state_text
+                    .iter()
+                    .map(|s| PropertyValue::CharacterString(s.clone()))
+                    .collect();
+                Ok(PropertyValue::Array(array))
+            }
             PropertyIdentifier::PriorityArray => {
                 let array: Vec<PropertyValue> = self
                     .priority_array
@@ -376,6 +440,9 @@ impl BacnetObject for MultiStateOutput {
                     })
                     .collect();
                 Ok(PropertyValue::Array(array))
+            }
+            PropertyIdentifier::RelinquishDefault => {
+                Ok(PropertyValue::UnsignedInteger(self.relinquish_default))
             }
             _ => Err(ObjectError::UnknownProperty),
         }
@@ -407,6 +474,20 @@ impl BacnetObject for MultiStateOutput {
                     Err(ObjectError::InvalidPropertyType)
                 }
             }
+            PropertyIdentifier::RelinquishDefault => {
+                if let PropertyValue::UnsignedInteger(val) = value {
+                    if val < 1 || val > self.number_of_states {
+                        return Err(ObjectError::InvalidValue(format!(
+                            "Value must be between 1 and {}",
+                            self.number_of_states
+                        )));
+                    }
+                    self.relinquish_default = val;
+                    Ok(())
+                } else {
+                    Err(ObjectError::InvalidPropertyType)
+                }
+            }
             _ => Err(ObjectError::PropertyNotWritable),
         }
     }
@@ -417,6 +498,7 @@ impl BacnetObject for MultiStateOutput {
             PropertyIdentifier::ObjectName
                 | PropertyIdentifier::PresentValue
                 | PropertyIdentifier::OutOfService
+                | PropertyIdentifier::RelinquishDefault
         )
     }
 
@@ -426,8 +508,15 @@ impl BacnetObject for MultiStateOutput {
             PropertyIdentifier::ObjectName,
             PropertyIdentifier::ObjectType,
             PropertyIdentifier::PresentValue,
+            PropertyIdentifier::Description,
+            PropertyIdentifier::StatusFlags,
+            PropertyIdentifier::EventState,
+            PropertyIdentifier::Reliability,
             PropertyIdentifier::OutOfService,
+            PropertyIdentifier::NumberOfStates,
+            PropertyIdentifier::StateText,
             PropertyIdentifier::PriorityArray,
+            PropertyIdentifier::RelinquishDefault,
         ]
     }
 }
@@ -451,7 +540,36 @@ impl BacnetObject for MultiStateValue {
             PropertyIdentifier::PresentValue => {
                 Ok(PropertyValue::UnsignedInteger(self.present_value))
             }
+            PropertyIdentifier::Description => {
+                Ok(PropertyValue::CharacterString(self.description.clone()))
+            }
+            PropertyIdentifier::StatusFlags => {
+                // StatusFlags is a BIT STRING of 4 bits: {in-alarm, fault, overridden, out-of-service}
+                Ok(PropertyValue::BitString(vec![
+                    (self.status_flags & 0x08) != 0, // in-alarm
+                    (self.status_flags & 0x04) != 0, // fault
+                    (self.status_flags & 0x02) != 0, // overridden
+                    (self.status_flags & 0x01) != 0, // out-of-service
+                ]))
+            }
+            PropertyIdentifier::EventState => {
+                Ok(PropertyValue::Enumerated(self.event_state as u32))
+            }
+            PropertyIdentifier::Reliability => {
+                Ok(PropertyValue::Enumerated(self.reliability as u32))
+            }
             PropertyIdentifier::OutOfService => Ok(PropertyValue::Boolean(self.out_of_service)),
+            PropertyIdentifier::NumberOfStates => {
+                Ok(PropertyValue::UnsignedInteger(self.number_of_states))
+            }
+            PropertyIdentifier::StateText => {
+                let array: Vec<PropertyValue> = self
+                    .state_text
+                    .iter()
+                    .map(|s| PropertyValue::CharacterString(s.clone()))
+                    .collect();
+                Ok(PropertyValue::Array(array))
+            }
             PropertyIdentifier::PriorityArray => {
                 let array: Vec<PropertyValue> = self
                     .priority_array
@@ -462,6 +580,9 @@ impl BacnetObject for MultiStateValue {
                     })
                     .collect();
                 Ok(PropertyValue::Array(array))
+            }
+            PropertyIdentifier::RelinquishDefault => {
+                Ok(PropertyValue::UnsignedInteger(self.relinquish_default))
             }
             _ => Err(ObjectError::UnknownProperty),
         }
@@ -493,6 +614,20 @@ impl BacnetObject for MultiStateValue {
                     Err(ObjectError::InvalidPropertyType)
                 }
             }
+            PropertyIdentifier::RelinquishDefault => {
+                if let PropertyValue::UnsignedInteger(val) = value {
+                    if val < 1 || val > self.number_of_states {
+                        return Err(ObjectError::InvalidValue(format!(
+                            "Value must be between 1 and {}",
+                            self.number_of_states
+                        )));
+                    }
+                    self.relinquish_default = val;
+                    Ok(())
+                } else {
+                    Err(ObjectError::InvalidPropertyType)
+                }
+            }
             _ => Err(ObjectError::PropertyNotWritable),
         }
     }
@@ -503,6 +638,7 @@ impl BacnetObject for MultiStateValue {
             PropertyIdentifier::ObjectName
                 | PropertyIdentifier::PresentValue
                 | PropertyIdentifier::OutOfService
+                | PropertyIdentifier::RelinquishDefault
         )
     }
 
@@ -512,8 +648,15 @@ impl BacnetObject for MultiStateValue {
             PropertyIdentifier::ObjectName,
             PropertyIdentifier::ObjectType,
             PropertyIdentifier::PresentValue,
+            PropertyIdentifier::Description,
+            PropertyIdentifier::StatusFlags,
+            PropertyIdentifier::EventState,
+            PropertyIdentifier::Reliability,
             PropertyIdentifier::OutOfService,
+            PropertyIdentifier::NumberOfStates,
+            PropertyIdentifier::StateText,
             PropertyIdentifier::PriorityArray,
+            PropertyIdentifier::RelinquishDefault,
         ]
     }
 }
