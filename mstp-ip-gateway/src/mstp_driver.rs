@@ -19,7 +19,7 @@ const MSTP_MAX_DATA_LENGTH: usize = 501;
 const MSTP_BROADCAST_ADDRESS: u8 = 255;
 
 // Polling configuration
-const NPOLL: u8 = 50; // Poll for new masters every 50 tokens
+const NPOLL: u8 = 255; // Poll for new masters every 255 tokens (reduced frequency for debugging)
 const MAX_RETRY: u8 = 3; // Maximum retries for failed transmissions
 
 /// MS/TP frame types
@@ -241,7 +241,12 @@ impl<'a> MstpDriver<'a> {
         self.run_state_machine()?;
 
         // Return any received data frames
-        Ok(self.receive_queue.pop_front())
+        let result = self.receive_queue.pop_front();
+        if let Some((ref data, source)) = result {
+            info!(">>> receive_frame() returning {} bytes from MAC {}, queue remaining: {}",
+                  data.len(), source, self.receive_queue.len());
+        }
+        Ok(result)
     }
 
     /// Process incoming UART bytes
@@ -324,8 +329,17 @@ impl<'a> MstpDriver<'a> {
 
             if calculated_crc != header_crc {
                 self.crc_errors += 1;
-                warn!("Header CRC error: expected 0x{:02X}, got 0x{:02X} (type={}, dest={}, src={})",
-                      calculated_crc, header_crc, frame_type, dest, source);
+                // Show full header bytes for debugging
+                let hdr_bytes = &self.rx_buffer[..MSTP_HEADER_SIZE.min(self.rx_buffer.len())];
+                warn!("Header CRC error: calc=0x{:02X} recv=0x{:02X} type={} dest={} src={} len={}",
+                      calculated_crc, header_crc, frame_type, dest, source, data_len);
+                warn!("  Header raw: {:02X?}", hdr_bytes);
+                // If this looks like a data frame, show more context
+                if self.rx_buffer.len() > MSTP_HEADER_SIZE {
+                    let preview_len = (self.rx_buffer.len() - MSTP_HEADER_SIZE).min(20);
+                    warn!("  Following {} bytes: {:02X?}", preview_len,
+                          &self.rx_buffer[MSTP_HEADER_SIZE..MSTP_HEADER_SIZE+preview_len]);
+                }
                 self.rx_buffer.drain(..2); // Skip preamble and try again
                 continue;
             }
@@ -333,6 +347,7 @@ impl<'a> MstpDriver<'a> {
             // Check for oversized frames
             if data_len > MSTP_MAX_DATA_LENGTH {
                 self.frame_errors += 1;
+                warn!("Oversized frame: data_len={} > max={}", data_len, MSTP_MAX_DATA_LENGTH);
                 self.rx_buffer.drain(..2); // Skip preamble and try again
                 continue;
             }
@@ -347,8 +362,22 @@ impl<'a> MstpDriver<'a> {
                 MSTP_HEADER_SIZE
             };
 
+            // CRITICAL DEBUG: Log ALL frames with their raw bytes
+            // For data frames (type 5 or 6), log extra details
+            if frame_type == 5 || frame_type == 6 || data_len > 0 {
+                let have_bytes = self.rx_buffer.len();
+                let raw_preview = have_bytes.min(35);
+                info!(">>> BACNET DATA FRAME: type={} src={} dest={} data_len={} need={} have={}",
+                      frame_type, source, dest, data_len, frame_size, have_bytes);
+                info!(">>> RAW BUFFER ({} bytes): {:02X?}", have_bytes, &self.rx_buffer[..raw_preview]);
+            }
+
             // Wait for complete frame
             if self.rx_buffer.len() < frame_size {
+                if data_len > 0 {
+                    info!(">>> Waiting for {} more bytes (have {}, need {})",
+                          frame_size - self.rx_buffer.len(), self.rx_buffer.len(), frame_size);
+                }
                 return Ok(());
             }
 
@@ -366,8 +395,13 @@ impl<'a> MstpDriver<'a> {
 
                 if received_crc != calculated_crc {
                     self.crc_errors += 1;
-                    warn!("Data CRC error: expected 0x{:04X}, got 0x{:04X} (frame_type={}, src={})",
-                          calculated_crc, received_crc, frame_type, source);
+                    // Verbose debug: show raw frame bytes for CRC debugging
+                    let frame_bytes: Vec<u8> = self.rx_buffer[..frame_size].to_vec();
+                    warn!("Data CRC error: calc=0x{:04X} recv=0x{:04X} (type={}, src={}, len={})",
+                          calculated_crc, received_crc, frame_type, source, data_len);
+                    warn!("  Frame raw ({} bytes): {:02X?}", frame_bytes.len(), &frame_bytes[..frame_bytes.len().min(40)]);
+                    warn!("  Data ({} bytes): {:02X?}", data.len(), &data[..data.len().min(24)]);
+                    warn!("  CRC bytes at [{}..{}]: [{:02X}, {:02X}]", data_end, data_end+2, crc_low, crc_high);
                     self.rx_buffer.drain(..frame_size);
                     continue;
                 }
@@ -380,16 +414,17 @@ impl<'a> MstpDriver<'a> {
             // Remove frame from buffer
             self.rx_buffer.drain(..frame_size);
 
-            // Debug: Log ALL valid frames
-            let ftype_name = MstpFrameType::from_u8(frame_type);
-            // CRITICAL DEBUG: Log Token and PollForMaster frames addressed to us
-            if frame_type == 0x00 || frame_type == 0x01 || data.len() > 0 {
-                info!("PARSED FRAME: type={:?}({}) src={} dest={} len={} our_addr={}",
-                      ftype_name, frame_type, source, dest, data.len(), self.station_address);
-            }
-
-            // Process frame
+            // Process frame FIRST - logging can wait!
+            // PollForMaster (0x01) requires immediate response within Tslot (10ms)
             self.handle_received_frame(frame_type, dest, source, data)?;
+
+            // Post-process logging for debugging (non-critical path)
+            // Only log data frames and unexpected frame types at info level
+            if data_len > 0 {
+                let ftype_name = MstpFrameType::from_u8(frame_type);
+                debug!("RX frame: type={:?} src={} dest={} len={}",
+                      ftype_name, source, dest, data_len);
+            }
         }
     }
 
@@ -505,39 +540,37 @@ impl<'a> MstpDriver<'a> {
                 }
             }
             Some(MstpFrameType::PollForMaster) => {
-                // Record source as a discovered master
+                // TIMING CRITICAL: Respond to poll FIRST, then do bookkeeping!
+                // We must reply within Tslot (10ms). Logging and other work comes AFTER.
+                if dest == self.station_address {
+                    // Send reply IMMEDIATELY - no logging before this!
+                    self.send_reply_to_poll(source)?;
+
+                    // Reset no_token timer after replying
+                    self.no_token_timer = Instant::now();
+
+                    // Now safe to log (after time-critical response sent)
+                    debug!("RPFM sent to {}", source);
+                }
+
+                // Record source as a discovered master (after reply sent)
                 if source <= 127 {
                     let was_known = (self.discovered_masters & (1u128 << source)) != 0;
                     self.discovered_masters |= 1u128 << source;
 
-                    // CRITICAL FIX: If we discover a new master via their poll, we're not sole master!
-                    // We must also update next_station to include the newly discovered master.
                     if !was_known {
                         info!("Discovered new master {} via PollForMaster", source);
                         if self.sole_master {
-                            info!("No longer sole master - found master at {}", source);
                             self.sole_master = false;
                         }
                         // Recalculate next_station to include newly discovered master
                         let old_next = self.next_station;
                         self.next_station = self.find_next_master();
                         if self.next_station != old_next {
-                            info!("Updated next_station: {} -> {} after discovering master {}",
+                            debug!("Updated next_station: {} -> {} after discovering master {}",
                                   old_next, self.next_station, source);
                         }
                     }
-                }
-                if dest == self.station_address {
-                    // Reply to poll - we're a master
-                    info!("Received PollForMaster from station {}, sending reply", source);
-                    self.send_reply_to_poll(source)?;
-
-                    // CRITICAL FIX: Reset no_token timer after replying to a poll!
-                    // The polling master is about to include us in the token ring and will
-                    // pass us the token shortly. We must wait for that token instead of
-                    // timing out and starting our own poll sweep.
-                    self.no_token_timer = Instant::now();
-                    info!("Reset no_token_timer after replying to poll from {}", source);
                 }
             }
             Some(MstpFrameType::BacnetDataExpectingReply) => {
@@ -560,7 +593,12 @@ impl<'a> MstpDriver<'a> {
                     // Queue for upper layer
                     info!("Received BACnet data from station {}, {} bytes (dest={})", source, data.len(), dest);
                     if self.receive_queue.len() < 16 {
+                        let preview_len = data.len().min(20);
+                        info!(">>> QUEUING DATA for upper layer: {} bytes, NPDU preview: {:02X?}", data.len(), &data[..preview_len]);
                         self.receive_queue.push_back((data, source));
+                        info!(">>> QUEUE now has {} items", self.receive_queue.len());
+                    } else {
+                        warn!(">>> QUEUE FULL - dropping frame!");
                     }
                 }
             }
@@ -588,9 +626,18 @@ impl<'a> MstpDriver<'a> {
 
         // NEGATIVE LIST APPROACH - only reject frames that are NOT replies
         match ftype {
+            // PollForMaster MUST ALWAYS be answered, even in WaitForReply state!
+            // Per ASHRAE 135, we respond to PFM in any state.
+            Some(MstpFrameType::PollForMaster) => {
+                if dest == self.station_address {
+                    info!("Received PollForMaster from {} while in WaitForReply, sending reply", source);
+                    self.send_reply_to_poll(source)?;
+                }
+                // Don't change state - continue waiting for our reply
+            }
+
             // These are NOT replies - unexpected frames in WaitForReply
             Some(MstpFrameType::Token) |
-            Some(MstpFrameType::PollForMaster) |
             Some(MstpFrameType::ReplyToPollForMaster) |
             Some(MstpFrameType::TestRequest) => {
                 // ReceivedUnexpectedFrame event
@@ -631,25 +678,58 @@ impl<'a> MstpDriver<'a> {
         dest: u8,
         source: u8,
     ) -> Result<(), MstpError> {
-        if let Some(MstpFrameType::ReplyToPollForMaster) = ftype {
-            // Only accept if addressed to us
-            if dest == self.station_address {
-                // Found a master!
-                info!("Received ReplyToPollForMaster from {}, next_station={}", source, source);
-                self.next_station = source;
-                self.sole_master = false;
+        match ftype {
+            // PollForMaster from another master - we MUST respond!
+            // This can happen when two stations are both trying to establish the ring
+            Some(MstpFrameType::PollForMaster) => {
+                if dest == self.station_address {
+                    info!("Received PollForMaster from {} while in PollForMaster state, sending reply", source);
+                    self.send_reply_to_poll(source)?;
 
-                // We generated the token via polling, so we should use it first
-                // before passing to the newly discovered master
-                self.token_count += 1;
-                self.tokens_received += 1;
-                self.frame_count = 0;
-                self.state = MstpState::UseToken;
-                self.usage_timer = Some(Instant::now());
-                info!("Transitioning to UseToken (we own the token after polling)");
-            } else {
-                debug!("Ignoring ReplyToPollForMaster not addressed to us (dest={}, we are {})", dest, self.station_address);
+                    // The other master found us first - they have priority
+                    // Defer to them and wait for the token
+                    self.discovered_masters |= 1u128 << source;
+                    self.sole_master = false;
+                    self.state = MstpState::Idle;
+                    self.no_token_timer = Instant::now();
+                    info!("Deferring to master {} who polled us first", source);
+                }
             }
+
+            Some(MstpFrameType::ReplyToPollForMaster) => {
+                // Only accept if addressed to us
+                if dest == self.station_address {
+                    // Found a master!
+                    info!("Received ReplyToPollForMaster from {}", source);
+
+                    // Add to discovered masters bitmap
+                    self.discovered_masters |= 1u128 << source;
+
+                    // Update next_station to the newly discovered master
+                    self.next_station = source;
+                    self.sole_master = false;
+
+                    // Advance poll_station past the discovered master for next poll cycle
+                    self.poll_station = (source + 1) % (self.max_master + 1);
+                    if self.poll_station == self.station_address {
+                        self.poll_station = (self.poll_station + 1) % (self.max_master + 1);
+                    }
+
+                    // We generated the token via polling, so we should use it first
+                    // before passing to the newly discovered master
+                    self.token_count += 1;
+                    self.tokens_received += 1;
+                    self.frame_count = 0;
+                    self.state = MstpState::UseToken;
+                    self.usage_timer = Some(Instant::now());
+                    info!("New master discovered at {}, next_station={}, poll_station={}",
+                          source, self.next_station, self.poll_station);
+                } else {
+                    debug!("Ignoring ReplyToPollForMaster not addressed to us (dest={}, we are {})", dest, self.station_address);
+                }
+            }
+
+            _ => {}
         }
         Ok(())
     }
@@ -817,17 +897,18 @@ impl<'a> MstpDriver<'a> {
             MstpState::DoneWithToken => {
                 // Check if we should poll for new masters
                 if self.token_count >= NPOLL {
-                    debug!("Poll interval reached, starting PollForMaster");
+                    debug!("Poll interval reached, polling station {}", self.poll_station);
                     self.token_count = 0;
-                    self.poll_station = (self.next_station + 1) % (self.max_master + 1);
-                    if self.poll_station != self.station_address {
-                        self.send_poll_for_master(self.poll_station)?;
-                        self.state = MstpState::PollForMaster;
-                        self.silence_timer = Instant::now();
-                    } else {
-                        // Would poll ourselves, just pass token
-                        self.state = MstpState::PassToken;
+
+                    // Skip our own address
+                    if self.poll_station == self.station_address {
+                        self.poll_station = (self.poll_station + 1) % (self.max_master + 1);
                     }
+
+                    // Send poll to current poll_station (incremented by PollForMaster state)
+                    self.send_poll_for_master(self.poll_station)?;
+                    self.state = MstpState::PollForMaster;
+                    self.silence_timer = Instant::now();
                 } else {
                     // Normal token pass
                     self.state = MstpState::PassToken;
@@ -856,25 +937,23 @@ impl<'a> MstpDriver<'a> {
 
             MstpState::PollForMaster => {
                 // Wait for reply with slot timeout
+                // FIX: Per ASHRAE 135 Clause 9, poll only ONE address per NPOLL interval,
+                // not a full sweep. Increment poll_station for the NEXT poll cycle.
                 if self.silence_timer.elapsed() > Duration::from_millis(self.t_slot) {
-                    // No reply, try next address
+                    // No reply from this station - increment poll_station for next time
                     self.poll_station = (self.poll_station + 1) % (self.max_master + 1);
 
+                    // Skip our own address
                     if self.poll_station == self.station_address {
-                        // Polled everyone, no response - we're sole master
-                        if !self.sole_master {
-                            info!("No other masters found, operating as sole master");
-                        }
-                        self.sole_master = true;
-                        self.next_station = self.station_address;
-                        self.state = MstpState::UseToken;
-                        self.usage_timer = Some(Instant::now());
-                        self.frame_count = 0;
-                    } else {
-                        // Poll next station
-                        self.send_poll_for_master(self.poll_station)?;
-                        self.silence_timer = Instant::now();
+                        self.poll_station = (self.poll_station + 1) % (self.max_master + 1);
                     }
+
+                    debug!("PollForMaster: no reply, next poll will be station {}",
+                           self.poll_station);
+
+                    // Now pass the token - don't continue polling
+                    // The next NPOLL cycle will poll poll_station
+                    self.state = MstpState::PassToken;
                 }
 
                 // Check overall no-token timeout (only log once, not repeatedly)
@@ -949,15 +1028,20 @@ impl<'a> MstpDriver<'a> {
             frame.push((data_crc >> 8) as u8);
         }
 
-        // Log all transmitted frames for debugging
-        if (ftype as u8) >= 5 {
-            info!("TX data frame: type={:?} dest={} len={} data={:02X?}",
-                  ftype, dest, data_len, &data[..data_len.min(20)]);
-            info!("TX RAW FRAME: {:02X?}", &frame[..frame.len().min(30)]);
-        } else {
-            // Log token/poll frames for debugging frame drops
-            info!("TX control frame: type={:?} dest={} raw={:02X?}",
-                   ftype, dest, &frame[..]);
+        // For time-critical frames (RPFM, Token), skip pre-TX logging entirely
+        // Logging is done AFTER transmission completes
+        let is_reply_to_poll = ftype == MstpFrameType::ReplyToPollForMaster;
+        let is_token = ftype == MstpFrameType::Token;
+        let skip_pre_log = is_reply_to_poll || is_token;
+
+        if !skip_pre_log {
+            // Log non-time-critical frames before TX
+            if (ftype as u8) >= 5 {
+                info!("TX data frame: type={:?} dest={} len={} data={:02X?}",
+                      ftype, dest, data_len, &data[..data_len.min(20)]);
+            } else {
+                debug!("TX control frame: type={:?} dest={}", ftype, dest);
+            }
         }
 
         // Tturnaround delay: minimum 40 bit-times between last received byte and first transmitted byte
@@ -989,8 +1073,8 @@ impl<'a> MstpDriver<'a> {
         // causes us to miss the Tslot window (10ms from poll TX end).
         //
         // For other frame types: check if another station is transmitting
-        let is_reply_to_poll = ftype == MstpFrameType::ReplyToPollForMaster;
-        let is_time_critical = ftype == MstpFrameType::Token || is_reply_to_poll;
+        // (is_reply_to_poll and is_token already defined above for logging decision)
+        let is_time_critical = is_reply_to_poll || is_token;
 
         if !is_reply_to_poll {
             // Only check bus activity for non-reply frames
@@ -1105,6 +1189,11 @@ impl<'a> MstpDriver<'a> {
 
         self.silence_timer = Instant::now();
         self.tx_frame_count += 1;
+
+        // Post-TX logging for time-critical frames (after transmission complete)
+        if skip_pre_log {
+            trace!("TX: {:?} -> {}", ftype, dest);
+        }
 
         Ok(())
     }
@@ -1254,6 +1343,7 @@ pub struct MstpStats {
 
 /// Calculate MS/TP header CRC-8 per ASHRAE 135 Annex G.1
 /// Uses polynomial X^8 + X^7 + 1
+/// This is the PARALLEL algorithm from the ASHRAE spec - NOT the standard bit-by-bit CRC!
 fn calculate_header_crc(header: &[u8]) -> u8 {
     let mut crc = 0xFFu8;
 

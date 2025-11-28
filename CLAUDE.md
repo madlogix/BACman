@@ -109,6 +109,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | Document | Description |
 |----------|-------------|
 | `MSTP_PROTOCOL_REQUIREMENTS.md` | **CRITICAL** - Detailed MS/TP state machine requirements from ASHRAE 135 Clause 9. Contains all state definitions, timing parameters, and the critical WAIT_FOR_REPLY negative list approach |
+| `MSTP_TESTING_PLAN.md` | **TESTING** - Comprehensive MS/TP testing plan with 8 phases covering frame layer, state machine, token passing, polling, and integration tests. Track progress and record test results here |
+| `MSTP_WIRESHARK_CAPTURE.md` | **DEBUGGING** - Guide for live MS/TP packet capture with Wireshark using mstpcap extcap plugin. Includes WSL2/usbipd setup for USB serial forwarding |
 | `PROJECT_COMPLETION_PLAN.md` | Task tracking and remaining work items |
 
 **When implementing MS/TP features, ALWAYS consult:**
@@ -265,6 +267,35 @@ cargo run --example whois_scan
 ```
 
 ## Key Implementation Notes
+
+### CRITICAL: MS/TP Timing-Sensitive Code
+
+**DO NOT ADD LOGGING OR DELAYS to these code paths in `mstp-ip-gateway/src/mstp_driver.rs`:**
+
+The MS/TP protocol requires responses within **Tslot = 10ms**. Adding `info!()`, `debug!()`, or any synchronous operations to these paths will break token ring stability:
+
+1. **PollForMaster → ReplyToPollForMaster path** (lines ~541-574)
+   - When `PollForMaster` is received, `send_reply_to_poll()` MUST be called IMMEDIATELY
+   - All logging and bookkeeping happens AFTER the reply is sent
+   - This was fixed on 2025-11-28 after Wireshark showed 27ms response times causing dropped tokens
+
+2. **`send_raw_frame()` for time-critical frames** (lines ~1030-1044)
+   - `ReplyToPollForMaster` and `Token` frames skip pre-TX logging
+   - Only use `trace!()` level (disabled by default) for these frames
+
+3. **Frame parsing in `parse_frames()`** (lines ~417-427)
+   - `handle_received_frame()` is called BEFORE any logging
+   - This ensures PollForMaster responses aren't delayed by log output
+
+**If you modify these areas, ALWAYS verify with Wireshark capture:**
+```bash
+timeout 15 ~/.config/wireshark/extcap/mstpcap --extcap-interface /dev/ttyACM1 --baud 38400
+```
+Check that `Trpfm` (Reply to Poll For Master timing) stays < 10ms and `Retries` stays at 0.
+
+See `MSTP_TIMING_FIX_PROGRESS.md` for full details on this fix.
+
+---
 
 ### MS/TP Token Passing
 The MS/TP driver implements the state machine from ASHRAE 135 Clause 9. Critical states:
