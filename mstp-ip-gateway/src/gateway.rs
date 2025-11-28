@@ -344,11 +344,13 @@ impl BacnetGateway {
         };
 
         // Build NPDU with source network info
+        // MS/TP → IP: Never final delivery (going to IP network, not local MS/TP)
         let routed_npdu = build_routed_npdu(
             data,
             self.mstp_network,
             &[source_addr],
             &npdu,
+            false, // Not final delivery
         )?;
 
         // Wrap in Forwarded-NPDU for routed messages (ASHRAE 135 Annex J.4.5)
@@ -483,7 +485,7 @@ impl BacnetGateway {
             }
             _ => {
                 // Forward other network messages to IP side
-                let routed_npdu = build_routed_npdu(data, self.mstp_network, &[_source_addr], npdu)?;
+                let routed_npdu = build_routed_npdu(data, self.mstp_network, &[_source_addr], npdu, false)?;
                 let bvlc = self.build_forwarded_npdu(&routed_npdu);
                 let dest = self.get_broadcast_address();
                 self.send_ip_packet(&bvlc, dest)?;
@@ -574,18 +576,20 @@ impl BacnetGateway {
             return self.handle_network_message_from_ip(npdu_data, &npdu, source_addr);
         }
 
-        // Determine MS/TP destination
-        let mstp_dest = if let Some(ref dest) = npdu.destination {
+        // Determine MS/TP destination and whether this is final delivery
+        // ASHRAE 135 Clause 6.2.2: Strip DNET/DADR when delivering to final destination network
+        let (mstp_dest, final_delivery) = if let Some(ref dest) = npdu.destination {
             if dest.network == self.mstp_network {
-                // Specific device on MS/TP network
-                if dest.address.is_empty() {
+                // Specific device on MS/TP network - THIS IS FINAL DELIVERY
+                let addr = if dest.address.is_empty() {
                     255 // Broadcast on MS/TP network
                 } else {
                     dest.address[0]
-                }
+                };
+                (addr, true) // Final delivery - strip DNET/DADR
             } else if dest.network == 0xFFFF {
-                // Global broadcast
-                255
+                // Global broadcast - delivered locally, so final delivery
+                (255, true) // Final delivery - strip DNET/DADR
             } else if dest.network == self.ip_network {
                 // Message is for the IP network, not MS/TP - don't route
                 return Ok(None);
@@ -605,16 +609,18 @@ impl BacnetGateway {
                 return Ok(None);
             }
         } else {
-            // Local delivery - check if it's for us or broadcast
-            255
+            // No destination network - local delivery (final delivery)
+            (255, true)
         };
 
         // Build NPDU with source network info
+        // final_delivery=true strips DNET/DADR per ASHRAE 135 Clause 6.2.2
         let routed_npdu = build_routed_npdu(
             npdu_data,
             self.ip_network,
             &ip_to_mac(&source_addr),
             &npdu,
+            final_delivery,
         )?;
 
         self.stats.ip_to_mstp_packets += 1;
@@ -758,11 +764,13 @@ impl BacnetGateway {
             }
         }
 
+        // Delivering to local MS/TP network = final delivery
         let routed_npdu = build_routed_npdu(
             npdu_data,
             self.ip_network,
             &ip_to_mac(&source_addr),
             &npdu,
+            true, // Final delivery - strip DNET/DADR
         )?;
 
         Ok(Some((routed_npdu, 255))) // Broadcast to MS/TP
@@ -804,8 +812,8 @@ impl BacnetGateway {
                 }
             }
             _ => {
-                // Forward to MS/TP network
-                let routed_npdu = build_routed_npdu(data, self.ip_network, &ip_to_mac(&source_addr), npdu)?;
+                // Forward to MS/TP network - final delivery
+                let routed_npdu = build_routed_npdu(data, self.ip_network, &ip_to_mac(&source_addr), npdu, true)?;
                 return Ok(Some((routed_npdu, 255)));
             }
         }
@@ -1164,11 +1172,16 @@ fn parse_npdu(data: &[u8]) -> Result<(NpduInfo, usize), GatewayError> {
 }
 
 /// Build a routed NPDU with source network information
+///
+/// Per ASHRAE 135 Clause 6.2.2: When delivering to the final destination network,
+/// the DNET/DADR fields must be stripped from the NPDU. Set `final_delivery` to true
+/// when the destination network matches the local network being delivered to.
 fn build_routed_npdu(
     original_data: &[u8],
     source_network: u16,
     source_address: &[u8],
     npdu: &NpduInfo,
+    final_delivery: bool,
 ) -> Result<Vec<u8>, GatewayError> {
     let mut result = Vec::new();
 
@@ -1180,7 +1193,8 @@ fn build_routed_npdu(
     if npdu.network_message {
         control |= 0x80;
     }
-    if npdu.destination.is_some() {
+    // ASHRAE 135 Clause 6.2.2: Strip DNET/DADR for final delivery
+    if npdu.destination.is_some() && !final_delivery {
         control |= 0x20;
     }
     // Always set source present since we're routing
@@ -1190,12 +1204,14 @@ fn build_routed_npdu(
     }
     result.push(control);
 
-    // Destination (if present)
+    // Destination (only if NOT final delivery per ASHRAE 135 Clause 6.2.2)
     if let Some(ref dest) = npdu.destination {
-        result.push((dest.network >> 8) as u8);
-        result.push((dest.network & 0xFF) as u8);
-        result.push(dest.address.len() as u8);
-        result.extend_from_slice(&dest.address);
+        if !final_delivery {
+            result.push((dest.network >> 8) as u8);
+            result.push((dest.network & 0xFF) as u8);
+            result.push(dest.address.len() as u8);
+            result.extend_from_slice(&dest.address);
+        }
     }
 
     // Source (always add for routing)
@@ -1204,8 +1220,8 @@ fn build_routed_npdu(
     result.push(source_address.len() as u8);
     result.extend_from_slice(source_address);
 
-    // Hop count (if destination present)
-    if npdu.destination.is_some() {
+    // Hop count (if destination present and NOT final delivery)
+    if npdu.destination.is_some() && !final_delivery {
         let hc = npdu.hop_count.unwrap_or(255).saturating_sub(1);
         result.push(hc);
     }

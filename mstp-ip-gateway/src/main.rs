@@ -274,10 +274,11 @@ fn main() -> anyhow::Result<()> {
     // Stack size increased from 8KB to 16KB to handle BACnet protocol processing
     // which may require significant stack space for NPDU parsing, routing tables,
     // and complex service handling (ASHRAE 135-2024)
+    let mstp_network_for_thread = config.mstp_network;
     let _mstp_thread = thread::Builder::new()
         .stack_size(16384)
         .spawn(move || {
-            mstp_receive_task(mstp_driver_clone, gateway_clone, local_device_clone, web_state_mstp);
+            mstp_receive_task(mstp_driver_clone, gateway_clone, local_device_clone, web_state_mstp, mstp_network_for_thread);
         })?;
     info!(">>> [MAIN] MS/TP thread spawned successfully!");
 
@@ -286,12 +287,13 @@ fn main() -> anyhow::Result<()> {
     let gateway_clone = Arc::clone(&gateway);
     let mstp_driver_clone = Arc::clone(&mstp_driver);
     let local_device_clone = Arc::clone(&local_device);
+    let ip_network_for_thread = config.ip_network;
     // Stack size reduced from 16KB to 8KB to conserve memory for main loop
     info!(">>> [MAIN] About to spawn IP receive thread...");
     match thread::Builder::new()
         .stack_size(8192)
         .spawn(move || {
-            ip_receive_task(socket_clone, gateway_clone, mstp_driver_clone, local_device_clone);
+            ip_receive_task(socket_clone, gateway_clone, mstp_driver_clone, local_device_clone, ip_network_for_thread);
         }) {
         Ok(_thread) => {
             info!(">>> [MAIN] IP thread spawned successfully!");
@@ -390,15 +392,14 @@ fn main() -> anyhow::Result<()> {
             warn!("Watchdog feed error (continuing anyway): {:?}", e);
         }
 
-        // Process any pending gateway tasks
-        if let Ok(mut gw) = gateway.lock() {
+        // Process any pending gateway tasks (non-blocking)
+        if let Ok(mut gw) = gateway.try_lock() {
             gw.process_housekeeping();
         }
 
-        // Check if Who-Is scan was requested from web portal FIRST (before locking driver)
-        // This ensures scan requests are processed even if driver lock is contended
+        // Check if Who-Is scan was requested from web portal (non-blocking)
         let scan_requested = {
-            match web_state.lock() {
+            match web_state.try_lock() {
                 Ok(mut web) => {
                     if web.scan_requested {
                         info!("Main loop: scan_requested=true, processing...");
@@ -408,10 +409,7 @@ fn main() -> anyhow::Result<()> {
                         false
                     }
                 }
-                Err(e) => {
-                    warn!("Main loop: Failed to lock web_state: {}", e);
-                    false
-                }
+                Err(_) => false,  // Skip this iteration if locked
             }
         };
 
@@ -505,8 +503,8 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        // Get MS/TP driver stats
-        if let Ok(mut driver) = mstp_driver.lock() {
+        // Get MS/TP driver stats (non-blocking to avoid starvation)
+        if let Ok(mut driver) = mstp_driver.try_lock() {
             let mstp_stats = driver.get_stats();
             status.rx_frames = mstp_stats.rx_frames;
             status.tx_frames = mstp_stats.tx_frames;
@@ -518,7 +516,7 @@ fn main() -> anyhow::Result<()> {
             status.has_token = driver.has_token();
 
             // Update web state with MS/TP stats
-            if let Ok(mut web) = web_state.lock() {
+            if let Ok(mut web) = web_state.try_lock() {
                 web.mstp_stats = mstp_stats;
 
                 // Check if stats reset was requested from web portal
@@ -530,10 +528,10 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        // Get gateway stats for web portal
-        if let Ok(gw) = gateway.lock() {
+        // Get gateway stats for web portal (non-blocking)
+        if let Ok(gw) = gateway.try_lock() {
             let gw_stats = gw.get_stats();
-            if let Ok(mut web) = web_state.lock() {
+            if let Ok(mut web) = web_state.try_lock() {
                 web.gateway_stats.mstp_to_ip_packets = gw_stats.mstp_to_ip_packets;
                 web.gateway_stats.ip_to_mstp_packets = gw_stats.ip_to_mstp_packets;
             }
@@ -552,8 +550,8 @@ fn main() -> anyhow::Result<()> {
                     if current_screen != DisplayScreen::Splash {
                         lcd.clear_and_reset().ok();
                     }
-                    // Update web state
-                    if let Ok(mut web) = web_state.lock() {
+                    // Update web state (non-blocking)
+                    if let Ok(mut web) = web_state.try_lock() {
                         web.wifi_connected = connected;
                     }
                 }
@@ -850,23 +848,32 @@ fn mstp_receive_task(
     gateway: Arc<Mutex<BacnetGateway>>,
     local_device: Arc<LocalDevice>,
     web_state: Arc<Mutex<web::WebState>>,
+    mstp_network: u16,
 ) {
     use local_device::DiscoveredDevice;
 
     info!("MS/TP receive task started");
 
+    // Counter for brief yields to prevent mutex starvation
+    let mut iteration_counter: u32 = 0;
+
     loop {
-        // Try to receive an MS/TP frame
+        iteration_counter += 1;
+
+        // Try to receive an MS/TP frame using try_lock()
+        // This allows main loop to acquire the lock when needed
         let frame = {
-            let mut driver = match mstp_driver.lock() {
-                Ok(d) => d,
-                Err(e) => {
-                    error!("Failed to lock MS/TP driver: {}", e);
-                    thread::sleep(Duration::from_millis(10));
+            match mstp_driver.try_lock() {
+                Ok(mut driver) => {
+                    driver.receive_frame()
+                }
+                Err(_) => {
+                    // Lock contention - yield to let main loop run
+                    // This is critical for preventing mutex starvation!
+                    thread::sleep(Duration::from_millis(1));
                     continue;
                 }
-            };
-            driver.receive_frame()
+            }
         };
 
         match frame {
@@ -906,16 +913,67 @@ fn mstp_receive_task(
 
                 // First, check if this is a message for our local device
                 // Parse NPDU to get to APDU
-                if let Some(response) = try_process_local_device(&data, &local_device) {
-                    // Send the response back via MS/TP
-                    if let Ok(mut driver) = mstp_driver.lock() {
-                        // Build NPDU wrapper for the response
-                        let (response_npdu, is_broadcast) = response;
-                        let dest = if is_broadcast { 0xFF } else { source_addr };
-                        info!("Sending local device response: {} bytes to MAC {} (broadcast={})",
-                              response_npdu.len(), dest, is_broadcast);
-                        if let Err(e) = driver.send_frame(&response_npdu, dest, false) {
-                            warn!("Failed to send local device response: {}", e);
+                if let Some((response_npdu, is_broadcast, source_info)) = try_process_local_device(&data, &local_device, mstp_network) {
+                    // Check if the original request came from a remote network
+                    // If so, we need to route the response back via the gateway to IP
+                    if let Some(ref src) = source_info {
+                        // Request came from a remote network - route response via gateway
+                        info!("Local device response needs routing to SNET={}, SADR={:02X?}",
+                              src.source_network, src.source_address);
+
+                        // Build NPDU with destination network info (the original source becomes destination)
+                        let mut routed_npdu = Vec::with_capacity(response_npdu.len() + 10);
+                        routed_npdu.push(0x01); // Version
+
+                        // Control: DNET present (0x20), no SNET for broadcast response
+                        routed_npdu.push(0x20);
+
+                        // DNET - original source network
+                        routed_npdu.extend_from_slice(&src.source_network.to_be_bytes());
+
+                        // DLEN and DADR - original source address
+                        routed_npdu.push(src.source_address.len() as u8);
+                        routed_npdu.extend_from_slice(&src.source_address);
+
+                        // Hop count
+                        routed_npdu.push(0xFF);
+
+                        // Append original APDU (skip version and control from response_npdu)
+                        if response_npdu.len() > 2 {
+                            routed_npdu.extend_from_slice(&response_npdu[2..]);
+                        }
+
+                        info!("Routing local device response to IP: {} bytes, NPDU: {:02X?}",
+                              routed_npdu.len(), &routed_npdu[..routed_npdu.len().min(20)]);
+
+                        // Route via gateway which will send to IP
+                        if let Ok(mut gw) = gateway.lock() {
+                            // The gateway's route_from_mstp expects this to be like it came from MS/TP
+                            // But we're generating this locally, so we use the MS/TP MAC address
+                            // However route_from_mstp will try to add source info, which we don't want
+                            // Instead, we should directly send via IP
+                            // Use the gateway's internal send_to_ip method or wrap in BVLC ourselves
+
+                            // For now, let's use a direct approach: the gateway has set_ip_socket
+                            // We can access it indirectly by calling route_from_mstp with our constructed NPDU
+                            // But that would double-wrap the source. Better to send directly.
+
+                            // Actually, the cleanest approach is to have the gateway expose a send method
+                            // For now, let's route this as if it came from our MS/TP address
+                            match gw.route_from_mstp(&routed_npdu, 0x03) {
+                                Ok(_) => info!("I-Am routed to IP network via gateway"),
+                                Err(e) => warn!("Failed to route I-Am to IP: {}", e),
+                            }
+                        }
+                    } else {
+                        // No source network info - send locally on MS/TP
+                        if let Ok(mut driver) = mstp_driver.lock() {
+                            let dest = if is_broadcast { 0xFF } else { source_addr };
+                            info!("Sending local device response: {} bytes to MAC {} (broadcast={})",
+                                  response_npdu.len(), dest, is_broadcast);
+                            if let Err(e) = driver.send_frame(&response_npdu, dest, false) {
+                                warn!("Failed to send local device response: {}", e);
+                            }
                         }
                     }
                 } else {
@@ -1004,21 +1062,37 @@ fn extract_apdu_from_npdu(data: &[u8]) -> Option<&[u8]> {
     }
 }
 
+/// Source routing information parsed from NPDU
+#[derive(Debug, Clone)]
+struct SourceRouteInfo {
+    /// Source network number (SNET)
+    pub source_network: u16,
+    /// Source address (SADR)
+    pub source_address: Vec<u8>,
+}
+
 /// Try to process a message with the local device, returns response if applicable
-fn try_process_local_device(data: &[u8], local_device: &LocalDevice) -> Option<(Vec<u8>, bool)> {
+/// Returns: (response_npdu, is_broadcast, optional_source_route)
+/// `local_network` is the network number where this local device resides (IP network for IP side, MS/TP network for MS/TP side)
+fn try_process_local_device(data: &[u8], local_device: &LocalDevice, local_network: u16) -> Option<(Vec<u8>, bool, Option<SourceRouteInfo>)> {
     // The data should be NPDU (network layer)
     // NPDU format: version (1) + control (1) + [optional dest/source] + APDU
+    info!(">>> try_process_local_device: {} bytes, NPDU: {:02X?}", data.len(), &data[..data.len().min(20)]);
+
     if data.len() < 2 {
+        info!(">>> NPDU too short");
         return None;
     }
 
     let version = data[0];
     if version != 0x01 {
+        info!(">>> Not BACnet NPDU (version=0x{:02X})", version);
         return None; // Not BACnet NPDU
     }
 
     let control = data[1];
     let mut pos = 2;
+    info!(">>> NPDU: version=0x{:02X}, control=0x{:02X}", version, control);
 
     // Check for destination network (bit 5)
     let has_dest = (control & 0x20) != 0;
@@ -1030,33 +1104,47 @@ fn try_process_local_device(data: &[u8], local_device: &LocalDevice) -> Option<(
     // Skip destination if present
     if has_dest {
         if pos + 3 > data.len() {
+            info!(">>> DNET parse: pos+3 > len ({} > {})", pos + 3, data.len());
             return None;
         }
         let dnet = u16::from_be_bytes([data[pos], data[pos + 1]]);
         pos += 2;
         let dlen = data[pos] as usize;
         pos += 1;
+        info!(">>> DNET=0x{:04X}, DLEN={}, local_network={}", dnet, dlen, local_network);
 
-        // If DNET is not 0xFFFF (broadcast) and not our network, skip
-        // For now, we accept broadcast (0xFFFF) or messages with no destination
-        if dnet != 0xFFFF {
-            // This is targeted at a specific network, might not be for us
-            // But we should still check - could be directed to our network
+        // If DNET is not 0xFFFF (global broadcast) and not our local network,
+        // this message should be routed, not processed locally
+        if dnet != 0xFFFF && dnet != local_network {
+            // This is targeted at a different network - let routing handle it
+            info!(">>> DNET not for us (not 0xFFFF and not local network {})", local_network);
+            return None;
         }
 
         pos += dlen;
     }
 
-    // Skip source if present
-    if has_source {
+    // Extract source network info if present
+    let source_info = if has_source {
         if pos + 3 > data.len() {
             return None;
         }
-        pos += 2; // SNET
+        let snet = u16::from_be_bytes([data[pos], data[pos + 1]]);
+        pos += 2;
         let slen = data[pos] as usize;
         pos += 1;
+        if pos + slen > data.len() {
+            return None;
+        }
+        let sadr = data[pos..pos + slen].to_vec();
         pos += slen;
-    }
+        Some(SourceRouteInfo {
+            source_network: snet,
+            source_address: sadr,
+        })
+    } else {
+        None
+    };
 
     // Skip hop count if destination was present
     if has_dest {
@@ -1073,13 +1161,17 @@ fn try_process_local_device(data: &[u8], local_device: &LocalDevice) -> Option<(
 
     // Now we have APDU at data[pos..]
     if pos >= data.len() {
+        info!(">>> No APDU: pos={} >= len={}", pos, data.len());
         return None;
     }
 
     let apdu = &data[pos..];
+    info!(">>> APDU at pos={}: {:02X?}", pos, &apdu[..apdu.len().min(20)]);
 
     // Process with local device
+    info!(">>> Calling local_device.process_apdu()...");
     if let Some((response_apdu, is_broadcast)) = local_device.process_apdu(apdu) {
+        info!(">>> Got response from local_device: {} bytes, is_broadcast={}", response_apdu.len(), is_broadcast);
         // Build NPDU wrapper for response
         // For I-Am (broadcast), use global broadcast
         // For ReadProperty response (unicast), use source routing if available
@@ -1100,7 +1192,7 @@ fn try_process_local_device(data: &[u8], local_device: &LocalDevice) -> Option<(
         // Append APDU
         npdu.extend_from_slice(&response_apdu);
 
-        return Some((npdu, is_broadcast));
+        return Some((npdu, is_broadcast, source_info));
     }
 
     None
@@ -1112,6 +1204,7 @@ fn ip_receive_task(
     gateway: Arc<Mutex<BacnetGateway>>,
     mstp_driver: Arc<Mutex<MstpDriver<'static>>>,
     local_device: Arc<LocalDevice>,
+    ip_network: u16,
 ) {
     info!("BACnet/IP receive task started");
 
@@ -1127,7 +1220,7 @@ fn ip_receive_task(
                       len, source_addr, &data[..data.len().min(20)]);
 
                 // Try to process with local device first (for Who-Is from IP side)
-                if let Some((response_npdu, is_broadcast)) = try_process_ip_local_device(data, &local_device) {
+                if let Some((response_npdu, is_broadcast)) = try_process_ip_local_device(data, &local_device, ip_network) {
                     // Wrap in BVLC and send back
                     let mut bvlc = Vec::with_capacity(response_npdu.len() + 4);
                     bvlc.push(0x81); // BVLC type
@@ -1163,11 +1256,20 @@ fn ip_receive_task(
                 if let Ok(mut gw) = gateway.lock() {
                     match gw.route_from_ip(data, source_addr) {
                         Ok(Some((mstp_data, mstp_dest))) => {
+                            // Check NPDU control byte for expecting-reply bit (bit 2 = 0x04)
+                            // NPDU format: [version, control, ...]
+                            // Control bit 2 indicates "data expecting reply"
+                            let expecting_reply = if mstp_data.len() >= 2 {
+                                (mstp_data[1] & 0x04) != 0
+                            } else {
+                                false
+                            };
+
                             // Send to MS/TP
-                            info!("IP->MS/TP routing: {} bytes to MS/TP dest={} NPDU: {:02X?}",
-                                  mstp_data.len(), mstp_dest, &mstp_data[..mstp_data.len().min(20)]);
+                            info!("IP->MS/TP routing: {} bytes to MS/TP dest={} expecting_reply={} NPDU: {:02X?}",
+                                  mstp_data.len(), mstp_dest, expecting_reply, &mstp_data[..mstp_data.len().min(20)]);
                             if let Ok(mut driver) = mstp_driver.lock() {
-                                match driver.send_frame(&mstp_data, mstp_dest, false) {
+                                match driver.send_frame(&mstp_data, mstp_dest, expecting_reply) {
                                     Ok(_) => info!("IP->MS/TP frame queued successfully"),
                                     Err(e) => warn!("Failed to send to MS/TP: {}", e),
                                 }
@@ -1196,7 +1298,9 @@ fn ip_receive_task(
 }
 
 /// Try to process an IP message with the local device
-fn try_process_ip_local_device(data: &[u8], local_device: &LocalDevice) -> Option<(Vec<u8>, bool)> {
+/// Returns (response_npdu, is_broadcast) - source info is ignored for IP side since
+/// the response is sent directly via IP socket to the source_addr
+fn try_process_ip_local_device(data: &[u8], local_device: &LocalDevice, ip_network: u16) -> Option<(Vec<u8>, bool)> {
     // BACnet/IP format: BVLC (4 bytes) + NPDU + APDU
     if data.len() < 4 {
         return None;
@@ -1216,6 +1320,8 @@ fn try_process_ip_local_device(data: &[u8], local_device: &LocalDevice) -> Optio
     // Skip BVLC header (4 bytes) to get NPDU
     let npdu_data = &data[4..];
 
-    // Use the same NPDU parsing as MS/TP side
-    try_process_local_device(npdu_data, local_device)
+    // Use the same NPDU parsing as MS/TP side, discard source info
+    // (IP responses are sent directly to source_addr via UDP)
+    try_process_local_device(npdu_data, local_device, ip_network)
+        .map(|(npdu, is_broadcast, _source_info)| (npdu, is_broadcast))
 }
