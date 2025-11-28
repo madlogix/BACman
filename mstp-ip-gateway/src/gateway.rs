@@ -792,7 +792,7 @@ impl BacnetGateway {
 
         match msg_type {
             NL_WHO_IS_ROUTER_TO_NETWORK => {
-                debug!("Received Who-Is-Router-To-Network from IP");
+                info!("Received Who-Is-Router-To-Network from IP (source: {})", source_addr);
                 // Check if asking about our MS/TP network
                 let requested_network = if npdu_len + 2 < data.len() {
                     Some(((data[npdu_len + 1] as u16) << 8) | (data[npdu_len + 2] as u16))
@@ -800,15 +800,25 @@ impl BacnetGateway {
                     None // Query for all networks
                 };
 
+                info!("  Requested network: {:?}, our MS/TP network: {}", requested_network, self.mstp_network);
+
                 if requested_network.is_none()
                     || requested_network == Some(self.mstp_network)
                     || requested_network == Some(0xFFFF)
                 {
                     // Respond with I-Am-Router-To-Network
-                    let response = self.build_i_am_router_to_network(&[self.mstp_network]);
+                    // Include both networks we route to
+                    let response = self.build_i_am_router_to_network(&[self.mstp_network, self.ip_network]);
                     let bvlc = build_bvlc(&response, true);
+
+                    // Send to broadcast for network discovery
                     let broadcast = self.get_broadcast_address();
                     self.send_ip_packet(&bvlc, broadcast)?;
+
+                    // Also send directly to the requester (common BACnet practice)
+                    // This ensures they receive our response even if broadcast fails
+                    info!("  Sending I-Am-Router-To-Network: networks {:?}", [self.mstp_network, self.ip_network]);
+                    self.send_ip_packet(&bvlc, source_addr)?;
                 }
             }
             _ => {

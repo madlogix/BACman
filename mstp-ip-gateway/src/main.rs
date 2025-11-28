@@ -288,12 +288,15 @@ fn main() -> anyhow::Result<()> {
     let mstp_driver_clone = Arc::clone(&mstp_driver);
     let local_device_clone = Arc::clone(&local_device);
     let ip_network_for_thread = config.ip_network;
+    let mstp_network_for_ip_thread = config.mstp_network;
+    let gateway_mac_for_thread = config.mstp_address;
     // Stack size reduced from 16KB to 8KB to conserve memory for main loop
     info!(">>> [MAIN] About to spawn IP receive thread...");
     match thread::Builder::new()
         .stack_size(8192)
         .spawn(move || {
-            ip_receive_task(socket_clone, gateway_clone, mstp_driver_clone, local_device_clone, ip_network_for_thread);
+            ip_receive_task(socket_clone, gateway_clone, mstp_driver_clone, local_device_clone,
+                           ip_network_for_thread, mstp_network_for_ip_thread, gateway_mac_for_thread);
         }) {
         Ok(_thread) => {
             info!(">>> [MAIN] IP thread spawned successfully!");
@@ -1198,8 +1201,11 @@ fn ip_receive_task(
     mstp_driver: Arc<Mutex<MstpDriver<'static>>>,
     local_device: Arc<LocalDevice>,
     ip_network: u16,
+    mstp_network: u16,
+    gateway_mac: u8,
 ) {
-    info!("BACnet/IP receive task started");
+    info!("BACnet/IP receive task started (gateway MAC {} on networks {} and {})",
+          gateway_mac, ip_network, mstp_network);
 
     let mut buffer = [0u8; 1500];
 
@@ -1213,7 +1219,8 @@ fn ip_receive_task(
                       len, source_addr, &data[..data.len().min(20)]);
 
                 // Try to process with local device first (for Who-Is from IP side)
-                if let Some((response_npdu, is_broadcast)) = try_process_ip_local_device(data, &local_device, ip_network) {
+                // Also check for requests addressed to gateway via MS/TP routing (DNET=mstp_network, DADR=gateway_mac)
+                if let Some((response_npdu, is_broadcast)) = try_process_ip_local_device(data, &local_device, ip_network, mstp_network, gateway_mac) {
                     // Wrap in BVLC and send back
                     let mut bvlc = Vec::with_capacity(response_npdu.len() + 4);
                     bvlc.push(0x81); // BVLC type
@@ -1293,7 +1300,17 @@ fn ip_receive_task(
 /// Try to process an IP message with the local device
 /// Returns (response_npdu, is_broadcast) - source info is ignored for IP side since
 /// the response is sent directly via IP socket to the source_addr
-fn try_process_ip_local_device(data: &[u8], local_device: &LocalDevice, ip_network: u16) -> Option<(Vec<u8>, bool)> {
+///
+/// This function handles requests for the gateway's local device from IP side, including:
+/// - Direct requests (no DNET or DNET=ip_network)
+/// - Routed requests to gateway's MS/TP address (DNET=mstp_network, DADR=gateway_mac)
+fn try_process_ip_local_device(
+    data: &[u8],
+    local_device: &LocalDevice,
+    ip_network: u16,
+    mstp_network: u16,
+    gateway_mac: u8,
+) -> Option<(Vec<u8>, bool)> {
     // BACnet/IP format: BVLC (4 bytes) + NPDU + APDU
     if data.len() < 4 {
         return None;
@@ -1313,8 +1330,32 @@ fn try_process_ip_local_device(data: &[u8], local_device: &LocalDevice, ip_netwo
     // Skip BVLC header (4 bytes) to get NPDU
     let npdu_data = &data[4..];
 
-    // Use the same NPDU parsing as MS/TP side, discard source info
-    // (IP responses are sent directly to source_addr via UDP)
+    // Check if this is addressed to gateway's MS/TP address (routed request)
+    // NPDU: version (1) + control (1) + [DNET (2) + DLEN (1) + DADR (DLEN) + hop_count (1)] + ...
+    if npdu_data.len() >= 6 {
+        let control = npdu_data[1];
+        let has_dest = (control & 0x20) != 0;
+
+        if has_dest {
+            let dnet = u16::from_be_bytes([npdu_data[2], npdu_data[3]]);
+            let dlen = npdu_data[4] as usize;
+
+            // Check if addressed to gateway's MS/TP address
+            if dnet == mstp_network && dlen == 1 && npdu_data.len() > 5 {
+                let dadr = npdu_data[5];
+                if dadr == gateway_mac {
+                    info!(">>> Routed request to gateway's MS/TP address (DNET={}, DADR={})",
+                          dnet, dadr);
+                    // Process as local device request, using mstp_network as local_network
+                    // so the DNET check passes
+                    return try_process_local_device(npdu_data, local_device, mstp_network)
+                        .map(|(npdu, is_broadcast, _source_info)| (npdu, is_broadcast));
+                }
+            }
+        }
+    }
+
+    // Standard processing - check for direct requests (no DNET or DNET=ip_network)
     try_process_local_device(npdu_data, local_device, ip_network)
         .map(|(npdu, is_broadcast, _source_info)| (npdu, is_broadcast))
 }
