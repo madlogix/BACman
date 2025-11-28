@@ -504,8 +504,9 @@ impl LocalDevice {
             PROP_PROTOCOL_SERVICES_SUPPORTED => {
                 // Bit string - services we support
                 // We support: I-Am (bit 26), Who-Is (bit 33), ReadProperty (bit 12)
-                // Bit string format: tag, length (incl unused bits byte), unused bits, data bytes
-                // 6 bytes needed for 48 bits, unused bits = 0
+                // Bit string format: tag, [extended length], unused bits, data bytes
+                // BACnet tag encoding: 0x85 = tag 8 (BitString), extended length (next byte)
+                // 6 bytes of bit data + 1 unused bits byte = 7 bytes total
                 let mut bits = [0u8; 6];
                 // Set bit 12 (ReadProperty) - byte 1, bit 4
                 bits[1] |= 0x08;
@@ -514,18 +515,20 @@ impl LocalDevice {
                 // Set bit 33 (Who-Is) - byte 4, bit 1
                 bits[4] |= 0x40;
 
-                let mut v = vec![0x82, 0x07, 0x00]; // Tag 8 (BitString), length 7, 0 unused bits
+                let mut v = vec![0x85, 0x07, 0x00]; // Tag 8 (BitString), length=7 (extended), 0 unused bits
                 v.extend_from_slice(&bits);
                 v
             }
             PROP_PROTOCOL_OBJECT_TYPES_SUPPORTED => {
                 // Bit string - object types we support
                 // We support: Device (bit 8)
+                // BACnet tag encoding: 0x85 = tag 8 (BitString), extended length (next byte)
+                // 7 bytes of bit data + 1 unused bits byte = 8 bytes total
                 let mut bits = [0u8; 7];
                 // Set bit 8 (Device) - byte 1, bit 0
                 bits[1] |= 0x80;
 
-                let mut v = vec![0x82, 0x08, 0x00]; // Tag 8 (BitString), length 8, 0 unused bits
+                let mut v = vec![0x85, 0x08, 0x00]; // Tag 8 (BitString), length=8 (extended), 0 unused bits
                 v.extend_from_slice(&bits);
                 v
             }
