@@ -208,7 +208,7 @@ impl<'a> MstpDriver<'a> {
             no_token_timer: now,
             t_no_token: 5000,  // Increased to 5s to allow Controller 6 time to complete poll sweep and discover M5Stack (MAC 3)
             t_reply_timeout: 255,
-            t_reply_delay: 250,
+            t_reply_delay: 1,  // Minimum delay before replying (was 250ms - way too long!)
             t_slot: 10,
             t_usage_timeout: 50,
         }
@@ -258,9 +258,25 @@ impl<'a> MstpDriver<'a> {
             match self.uart.read(&mut buf, 0) {
                 Ok(0) => break,
                 Ok(n) => {
-                    // Log raw bytes as they arrive (use info! for diagnostics)
+                    // CRITICAL: Minimize logging overhead in RX path!
+                    // Only log broadcast/data frames which we're debugging
                     if n > 0 {
-                        info!("UART_RX {} bytes: {:02X?}", n, &buf[..n.min(32)]);
+                        // Check for BROADCAST data frame: 55 FF 06 FF (type=6, dest=255)
+                        let has_broadcast = buf[..n].windows(4).any(|w| {
+                            w[0] == 0x55 && w[1] == 0xFF && w[2] == 0x06 && w[3] == 0xFF
+                        });
+                        // Check for any data frame (type 0x05 or 0x06)
+                        let has_data_frame = buf[..n].windows(3).any(|w| {
+                            w[0] == 0x55 && w[1] == 0xFF && (w[2] == 0x05 || w[2] == 0x06)
+                        });
+
+                        if has_broadcast {
+                            warn!("**** BROADCAST DATA FRAME (Who-Is?) **** UART_RX {} bytes: {:02X?}", n, &buf[..n.min(64)]);
+                        } else if has_data_frame {
+                            warn!("!!!! DATA FRAME DETECTED !!!! UART_RX {} bytes: {:02X?}", n, &buf[..n.min(64)]);
+                        }
+                        // Token/control frames: use trace!() to minimize overhead
+                        // trace!("UART_RX {} bytes: {:02X?}", n, &buf[..n.min(32)]);
                     }
                     self.rx_buffer.extend_from_slice(&buf[..n]);
                     self.silence_timer = Instant::now();
@@ -468,7 +484,7 @@ impl<'a> MstpDriver<'a> {
                 self.handle_frame_in_wait_for_reply(ftype, dest, source, data)?;
             }
             MstpState::PollForMaster => {
-                self.handle_frame_in_poll_for_master(ftype, dest, source)?;
+                self.handle_frame_in_poll_for_master(ftype, dest, source, data)?;
             }
             _ => {
                 // For other states, handle basic frames
@@ -677,6 +693,7 @@ impl<'a> MstpDriver<'a> {
         ftype: Option<MstpFrameType>,
         dest: u8,
         source: u8,
+        data: Vec<u8>,
     ) -> Result<(), MstpError> {
         match ftype {
             // PollForMaster from another master - we MUST respond!
@@ -726,6 +743,17 @@ impl<'a> MstpDriver<'a> {
                           source, self.next_station, self.poll_station);
                 } else {
                     debug!("Ignoring ReplyToPollForMaster not addressed to us (dest={}, we are {})", dest, self.station_address);
+                }
+            }
+
+            // IMPORTANT: Queue data frames even while in PollForMaster state
+            // This prevents dropping Who-Is broadcasts during polling
+            Some(MstpFrameType::BacnetDataNotExpectingReply) => {
+                if dest == self.station_address || dest == MSTP_BROADCAST_ADDRESS {
+                    if self.receive_queue.len() < 16 {
+                        info!("Queuing DNER in PollForMaster state: {} bytes from {}", data.len(), source);
+                        self.receive_queue.push_back((data, source));
+                    }
                 }
             }
 
@@ -870,22 +898,28 @@ impl<'a> MstpDriver<'a> {
             }
 
             MstpState::AnswerDataRequest => {
-                // Wait for minimum reply delay before sending response
+                // CRITICAL: When we receive DataExpectingReply, we have the implicit
+                // right to send a reply immediately (no token needed).
+                // Wait for minimum reply delay, then queue for upper layer processing.
                 if let Some(timer) = self.reply_delay_timer {
                     if timer.elapsed() >= Duration::from_millis(self.t_reply_delay) {
-                        // Ready to send reply
+                        // Ready to send reply - queue the request for upper layer
                         if let Some((request_data, source)) = self.pending_request.take() {
-                            // Queue the request for upper layer processing
-                            // The upper layer should call send_reply() with the response
                             if self.receive_queue.len() < 16 {
+                                info!("AnswerDataRequest: Queuing request ({} bytes from MAC {}) for processing",
+                                      request_data.len(), source);
                                 self.receive_queue.push_back((request_data, source));
                             }
                         }
 
-                        // Return to Idle
+                        // IMPORTANT: Transition to UseToken, NOT Idle!
+                        // We have the implicit right to reply - the sender is waiting.
+                        // Go to UseToken to give the application layer time to queue a response.
                         self.reply_delay_timer = None;
-                        self.state = MstpState::Idle;
-                        self.no_token_timer = Instant::now();
+                        self.frame_count = 0;
+                        self.usage_timer = Some(Instant::now());
+                        self.state = MstpState::UseToken;
+                        info!("AnswerDataRequest -> UseToken: Waiting for response to be queued");
                     }
                 } else {
                     // No timer set, something went wrong
@@ -916,10 +950,10 @@ impl<'a> MstpDriver<'a> {
             }
 
             MstpState::PassToken => {
-                info!("PassToken: Sending token to station {} (send_queue_len={})",
-                      self.next_station, self.send_queue.len());
+                // CRITICAL: No logging before or after token pass!
+                // The receiving station may start TX within ~1ms of receiving token.
+                // Any delay here causes us to miss the start of their frame.
                 self.send_token(self.next_station)?;
-                info!("Token passed to station {}, transitioning to Idle", self.next_station);
                 self.state = MstpState::Idle;
                 self.no_token_timer = Instant::now();
             }
@@ -1129,9 +1163,15 @@ impl<'a> MstpDriver<'a> {
         // Wait for TX to complete
         // At 38400 baud: each byte = 10 bits = ~260us
         // Total frame time = frame.len() * 260us
-        // For time-critical frames (ReplyToPollForMaster), use minimal margin
-        // For other frames, add more margin to ensure transceiver settles
-        let extra_margin_us = if is_reply_to_poll { 200 } else { 2000 };
+        //
+        // CRITICAL: After TX completes, we need to start listening IMMEDIATELY.
+        // The receiving station may start transmitting after just 40 bit-times (~1ms).
+        // If we sleep too long after TX, we'll miss the start of their frame!
+        //
+        // For Token frames: the next station starts TX after turnaround (~1ms)
+        // For ReplyToPollForMaster: polling master expects reply within Tslot (10ms)
+        // For data frames: can use slightly more margin
+        let extra_margin_us = if is_time_critical { 200 } else { 1000 };
         let tx_time_us = (frame.len() as u64) * 260 + extra_margin_us;
         std::thread::sleep(std::time::Duration::from_micros(tx_time_us));
 

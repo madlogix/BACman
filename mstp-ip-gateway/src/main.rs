@@ -914,21 +914,25 @@ fn mstp_receive_task(
                 // First, check if this is a message for our local device
                 // Parse NPDU to get to APDU
                 if let Some((response_npdu, is_broadcast, source_info)) = try_process_local_device(&data, &local_device, mstp_network) {
-                    // Check if the original request came from a remote network
-                    // If so, we need to route the response back via the gateway to IP
+                    // CRITICAL FIX: Always send responses on MS/TP, not directly to IP!
+                    // When the request came from a remote network (e.g., IP via router at station 2),
+                    // we need to send the response on MS/TP TO THE ROUTER, which will forward it.
+                    // This is how other devices (like JCI controllers) respond.
+
                     if let Some(ref src) = source_info {
-                        // Request came from a remote network - route response via gateway
-                        info!("Local device response needs routing to SNET={}, SADR={:02X?}",
+                        // Request came from a remote network - build NPDU with routing info
+                        // and send on MS/TP to the router that forwarded the request
+                        info!("Local device response for remote request from SNET={}, SADR={:02X?}",
                               src.source_network, src.source_address);
 
                         // Build NPDU with destination network info (the original source becomes destination)
-                        let mut routed_npdu = Vec::with_capacity(response_npdu.len() + 10);
+                        let mut routed_npdu = Vec::with_capacity(response_npdu.len() + 12);
                         routed_npdu.push(0x01); // Version
 
-                        // Control: DNET present (0x20), no SNET for broadcast response
+                        // Control: DNET present (0x20)
                         routed_npdu.push(0x20);
 
-                        // DNET - original source network
+                        // DNET - original source network (where the request came from)
                         routed_npdu.extend_from_slice(&src.source_network.to_be_bytes());
 
                         // DLEN and DADR - original source address
@@ -943,30 +947,19 @@ fn mstp_receive_task(
                             routed_npdu.extend_from_slice(&response_npdu[2..]);
                         }
 
-                        info!("Routing local device response to IP: {} bytes, NPDU: {:02X?}",
-                              routed_npdu.len(), &routed_npdu[..routed_npdu.len().min(20)]);
-
-                        // Route via gateway which will send to IP
-                        if let Ok(mut gw) = gateway.lock() {
-                            // The gateway's route_from_mstp expects this to be like it came from MS/TP
-                            // But we're generating this locally, so we use the MS/TP MAC address
-                            // However route_from_mstp will try to add source info, which we don't want
-                            // Instead, we should directly send via IP
-                            // Use the gateway's internal send_to_ip method or wrap in BVLC ourselves
-
-                            // For now, let's use a direct approach: the gateway has set_ip_socket
-                            // We can access it indirectly by calling route_from_mstp with our constructed NPDU
-                            // But that would double-wrap the source. Better to send directly.
-
-                            // Actually, the cleanest approach is to have the gateway expose a send method
-                            // For now, let's route this as if it came from our MS/TP address
-                            match gw.route_from_mstp(&routed_npdu, 0x03) {
-                                Ok(_) => info!("I-Am routed to IP network via gateway"),
-                                Err(e) => warn!("Failed to route I-Am to IP: {}", e),
+                        // Send on MS/TP to the router (source_addr is the MAC of the router that sent us the request)
+                        // The router will see DNET in the NPDU and forward it to the appropriate network
+                        if let Ok(mut driver) = mstp_driver.lock() {
+                            info!("Sending I-Am on MS/TP to router MAC {}: {} bytes, NPDU: {:02X?}",
+                                  source_addr, routed_npdu.len(), &routed_npdu[..routed_npdu.len().min(30)]);
+                            if let Err(e) = driver.send_frame(&routed_npdu, source_addr, false) {
+                                warn!("Failed to send I-Am to MS/TP router: {}", e);
+                            } else {
+                                info!("I-Am queued for MS/TP transmission to router MAC {}", source_addr);
                             }
                         }
                     } else {
-                        // No source network info - send locally on MS/TP
+                        // No source network info - send locally on MS/TP (broadcast for I-Am)
                         if let Ok(mut driver) = mstp_driver.lock() {
                             let dest = if is_broadcast { 0xFF } else { source_addr };
                             info!("Sending local device response: {} bytes to MAC {} (broadcast={})",
