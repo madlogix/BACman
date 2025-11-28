@@ -1,0 +1,1123 @@
+{
+  "table_of_contents": [
+    {
+      "title": "",
+      "heading_level": null,
+      "page_id": 0,
+      "polygon": [
+        [
+          53.490234375,
+          106.34765625
+        ],
+        [
+          233.384765625,
+          106.34765625
+        ],
+        [
+          233.384765625,
+          142.69921875
+        ],
+        [
+          53.490234375,
+          142.69921875
+        ]
+      ]
+    },
+    {
+      "title": "ASHRAE Guideline 36-2021",
+      "heading_level": null,
+      "page_id": 0,
+      "polygon": [
+        [
+          382.5,
+          174.0234375
+        ],
+        [
+          573.5294799804688,
+          174.0234375
+        ],
+        [
+          573.5294799804688,
+          189.304931640625
+        ],
+        [
+          382.5,
+          189.304931640625
+        ]
+      ]
+    },
+    {
+      "title": "High-Performance\nSequences of Operation\nfor HVAC Systems",
+      "heading_level": null,
+      "page_id": 0,
+      "polygon": [
+        [
+          77.09939575195312,
+          243.32305908203125
+        ],
+        [
+          573.75,
+          243.32305908203125
+        ],
+        [
+          573.75,
+          388.65234375
+        ],
+        [
+          77.09939575195312,
+          388.65234375
+        ]
+      ]
+    },
+    {
+      "title": "ASHRAE Guideline Project Committee 36\nCognizant TC: 1.4, Control Theory and Application\nSPLS Liaison: Christian Taber",
+      "heading_level": null,
+      "page_id": 1,
+      "polygon": [
+        [
+          205.59375,
+          27.0703125
+        ],
+        [
+          402.8203125,
+          27.0703125
+        ],
+        [
+          402.8203125,
+          57.0399169921875
+        ],
+        [
+          205.59375,
+          57.0399169921875
+        ]
+      ]
+    },
+    {
+      "title": "ASHRAE STANDARDS COMMITTEE 2021\u20132022",
+      "heading_level": null,
+      "page_id": 1,
+      "polygon": [
+        [
+          210.97265625,
+          266.8359375
+        ],
+        [
+          399.0700378417969,
+          266.8359375
+        ],
+        [
+          399.0700378417969,
+          276.5819091796875
+        ],
+        [
+          210.97265625,
+          276.5819091796875
+        ]
+      ]
+    },
+    {
+      "title": "SPECIAL NOTE",
+      "heading_level": null,
+      "page_id": 1,
+      "polygon": [
+        [
+          273.7265625,
+          425.77734375
+        ],
+        [
+          335.8828125,
+          425.77734375
+        ],
+        [
+          335.8828125,
+          435.7008972167969
+        ],
+        [
+          273.7265625,
+          435.7008972167969
+        ]
+      ]
+    },
+    {
+      "title": "DISCLAIMER",
+      "heading_level": null,
+      "page_id": 1,
+      "polygon": [
+        [
+          277.611328125,
+          605.21484375
+        ],
+        [
+          330.108154296875,
+          605.21484375
+        ],
+        [
+          330.108154296875,
+          615.4569091796875
+        ],
+        [
+          277.611328125,
+          615.4569091796875
+        ]
+      ]
+    },
+    {
+      "title": "ASHRAE INDUSTRIAL ADVERTISING POLICY ON STANDARDS",
+      "heading_level": null,
+      "page_id": 1,
+      "polygon": [
+        [
+          175.11328125,
+          671.73046875
+        ],
+        [
+          432.1045227050781,
+          671.73046875
+        ],
+        [
+          432.1045227050781,
+          682.4749069213867
+        ],
+        [
+          175.11328125,
+          682.4749069213867
+        ]
+      ]
+    },
+    {
+      "title": "CONTENTS",
+      "heading_level": null,
+      "page_id": 2,
+      "polygon": [
+        [
+          277.013671875,
+          37.125
+        ],
+        [
+          333.7500305175781,
+          37.125
+        ],
+        [
+          333.7500305175781,
+          47.41339111328125
+        ],
+        [
+          277.013671875,
+          47.41339111328125
+        ]
+      ]
+    },
+    {
+      "title": "ASHRAE Guideline 36-2021\nHigh-Performance Sequences of Operation for HVAC Systems",
+      "heading_level": null,
+      "page_id": 2,
+      "polygon": [
+        [
+          158.0800018310547,
+          53.75390625
+        ],
+        [
+          453.45001220703125,
+          53.75390625
+        ],
+        [
+          453.45001220703125,
+          76.41339111328125
+        ],
+        [
+          158.0800018310547,
+          76.41339111328125
+        ]
+      ]
+    },
+    {
+      "title": "NOTE",
+      "heading_level": null,
+      "page_id": 3,
+      "polygon": [
+        [
+          308.091796875,
+          304.734375
+        ],
+        [
+          336.875,
+          304.734375
+        ],
+        [
+          336.875,
+          319.7950744628906
+        ],
+        [
+          308.091796875,
+          319.7950744628906
+        ]
+      ]
+    },
+    {
+      "title": "\u00a9 2021 ASHRAE",
+      "heading_level": null,
+      "page_id": 3,
+      "polygon": [
+        [
+          267.15234375,
+          380.53125
+        ],
+        [
+          346.04296875,
+          380.53125
+        ],
+        [
+          346.04296875,
+          391.25341796875
+        ],
+        [
+          267.15234375,
+          391.25341796875
+        ]
+      ]
+    },
+    {
+      "title": "FOREWORD",
+      "heading_level": null,
+      "page_id": 4,
+      "polygon": [
+        [
+          72.017578125,
+          133.03125
+        ],
+        [
+          131.4550018310547,
+          133.03125
+        ],
+        [
+          131.4550018310547,
+          143.93341064453125
+        ],
+        [
+          72.017578125,
+          143.93341064453125
+        ]
+      ]
+    },
+    {
+      "title": "Note on Format",
+      "heading_level": null,
+      "page_id": 4,
+      "polygon": [
+        [
+          71.419921875,
+          446.66015625
+        ],
+        [
+          145.80499267578125,
+          446.66015625
+        ],
+        [
+          145.80499267578125,
+          457.533447265625
+        ],
+        [
+          71.419921875,
+          457.533447265625
+        ]
+      ]
+    },
+    {
+      "title": "1. PURPOSE",
+      "heading_level": null,
+      "page_id": 4,
+      "polygon": [
+        [
+          71.419921875,
+          563.44921875
+        ],
+        [
+          135.14500427246094,
+          563.44921875
+        ],
+        [
+          135.14500427246094,
+          574.0534057617188
+        ],
+        [
+          71.419921875,
+          574.0534057617188
+        ]
+      ]
+    },
+    {
+      "title": "2. SCOPE",
+      "heading_level": null,
+      "page_id": 4,
+      "polygon": [
+        [
+          71.12109375,
+          624.55078125
+        ],
+        [
+          121.16499328613281,
+          624.55078125
+        ],
+        [
+          121.16499328613281,
+          635.3334045410156
+        ],
+        [
+          71.12109375,
+          635.3334045410156
+        ]
+      ]
+    },
+    {
+      "title": "3. SETPOINTS, DESIGN AND FIELD DETERMINED",
+      "heading_level": null,
+      "page_id": 4,
+      "polygon": [
+        [
+          70.224609375,
+          691.06640625
+        ],
+        [
+          314.45001220703125,
+          691.06640625
+        ],
+        [
+          314.45001220703125,
+          701.3584136962891
+        ],
+        [
+          70.224609375,
+          701.3584136962891
+        ]
+      ]
+    },
+    {
+      "title": "3.1.1. General Zone Information",
+      "heading_level": null,
+      "page_id": 5,
+      "polygon": [
+        [
+          71.419921875,
+          105.1875
+        ],
+        [
+          217.845703125,
+          105.1875
+        ],
+        [
+          217.845703125,
+          115.731201171875
+        ],
+        [
+          71.419921875,
+          115.731201171875
+        ]
+      ]
+    },
+    {
+      "title": "3.1.1.1. Zone Temperature Setpoints",
+      "heading_level": null,
+      "page_id": 5,
+      "polygon": [
+        [
+          86.52499389648438,
+          122.9765625
+        ],
+        [
+          254.6015625,
+          122.9765625
+        ],
+        [
+          254.6015625,
+          133.751220703125
+        ],
+        [
+          86.52499389648438,
+          133.751220703125
+        ]
+      ]
+    },
+    {
+      "title": "3.1.1.2. Outdoor Air Ventilation Setpoints",
+      "heading_level": null,
+      "page_id": 5,
+      "polygon": [
+        [
+          83.970703125,
+          363.515625
+        ],
+        [
+          275.818359375,
+          363.515625
+        ],
+        [
+          275.818359375,
+          373.82122802734375
+        ],
+        [
+          83.970703125,
+          373.82122802734375
+        ]
+      ]
+    },
+    {
+      "title": "3.1.1.3. CO<sub>2</sub> Setpoints",
+      "heading_level": null,
+      "page_id": 6,
+      "polygon": [
+        [
+          85.46484375,
+          257.94140625
+        ],
+        [
+          196.62890625,
+          257.94140625
+        ],
+        [
+          196.62890625,
+          267.99609375
+        ],
+        [
+          85.46484375,
+          267.99609375
+        ]
+      ]
+    },
+    {
+      "title": "Informative Table 3.1.1.3 Default CO<sub>2</sub> Setpoints per ASHRAE Standard 62.1",
+      "heading_level": null,
+      "page_id": 6,
+      "polygon": [
+        [
+          126.703125,
+          580.078125
+        ],
+        [
+          445.8515625,
+          580.078125
+        ],
+        [
+          445.8515625,
+          589.359375
+        ],
+        [
+          126.703125,
+          589.359375
+        ]
+      ]
+    },
+    {
+      "title": "California Title 24 CO2 Setpoint Guidance",
+      "heading_level": null,
+      "page_id": 7,
+      "polygon": [
+        [
+          71.419921875,
+          651.234375
+        ],
+        [
+          244.142578125,
+          651.234375
+        ],
+        [
+          244.142578125,
+          660.515625
+        ],
+        [
+          71.419921875,
+          660.515625
+        ]
+      ]
+    },
+    {
+      "title": "3.1.2. VAV Box Design Information",
+      "heading_level": null,
+      "page_id": 8,
+      "polygon": [
+        [
+          70.822265625,
+          73.731201171875
+        ],
+        [
+          234.47000122070312,
+          73.731201171875
+        ],
+        [
+          234.47000122070312,
+          83.91796875
+        ],
+        [
+          70.822265625,
+          83.91796875
+        ]
+      ]
+    },
+    {
+      "title": "3.1.2.1. VAV Cooling-Only Terminal Unit",
+      "heading_level": null,
+      "page_id": 8,
+      "polygon": [
+        [
+          86.52499389648438,
+          124.13671875
+        ],
+        [
+          280.30078125,
+          124.13671875
+        ],
+        [
+          280.30078125,
+          134.751220703125
+        ],
+        [
+          86.52499389648438,
+          134.751220703125
+        ]
+      ]
+    },
+    {
+      "title": "3.1.2.2. VAV Reheat Terminal Unit",
+      "heading_level": null,
+      "page_id": 8,
+      "polygon": [
+        [
+          85.46484375,
+          329.87109375
+        ],
+        [
+          250.97000122070312,
+          329.87109375
+        ],
+        [
+          250.97000122070312,
+          340.8012390136719
+        ],
+        [
+          85.46484375,
+          340.8012390136719
+        ]
+      ]
+    },
+    {
+      "title": "3.1.2.3. Parallel Fan-Powered Terminal Unit, Constant-Volume Fan",
+      "heading_level": null,
+      "page_id": 8,
+      "polygon": [
+        [
+          85.166015625,
+          660.12890625
+        ],
+        [
+          379.1199951171875,
+          660.12890625
+        ],
+        [
+          379.1199951171875,
+          670.1512145996094
+        ],
+        [
+          85.166015625,
+          670.1512145996094
+        ]
+      ]
+    },
+    {
+      "title": "3.1.2.4. Parallel Fan-Powered Terminal Unit, Variable-Volume Fan",
+      "heading_level": null,
+      "page_id": 9,
+      "polygon": [
+        [
+          86.52499389648438,
+          182.53125
+        ],
+        [
+          377.8500061035156,
+          182.53125
+        ],
+        [
+          377.8500061035156,
+          193.251220703125
+        ],
+        [
+          86.52499389648438,
+          193.251220703125
+        ]
+      ]
+    }
+  ],
+  "page_stats": [
+    {
+      "page_id": 0,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          36
+        ],
+        [
+          "Line",
+          19
+        ],
+        [
+          "Text",
+          6
+        ],
+        [
+          "Picture",
+          3
+        ],
+        [
+          "SectionHeader",
+          3
+        ],
+        [
+          "PageFooter",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 1,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          135
+        ],
+        [
+          "TableCell",
+          76
+        ],
+        [
+          "Line",
+          57
+        ],
+        [
+          "Text",
+          10
+        ],
+        [
+          "SectionHeader",
+          5
+        ],
+        [
+          "ListItem",
+          4
+        ],
+        [
+          "Table",
+          2
+        ],
+        [
+          "PageHeader",
+          1
+        ],
+        [
+          "Footnote",
+          1
+        ],
+        [
+          "TableGroup",
+          1
+        ],
+        [
+          "ListGroup",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 2,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          135
+        ],
+        [
+          "TableCell",
+          105
+        ],
+        [
+          "Line",
+          42
+        ],
+        [
+          "SectionHeader",
+          2
+        ],
+        [
+          "PageHeader",
+          1
+        ],
+        [
+          "TableOfContents",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 3,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          63
+        ],
+        [
+          "TableCell",
+          28
+        ],
+        [
+          "Line",
+          22
+        ],
+        [
+          "Text",
+          3
+        ],
+        [
+          "SectionHeader",
+          2
+        ],
+        [
+          "PageHeader",
+          1
+        ],
+        [
+          "TableOfContents",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 4,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          112
+        ],
+        [
+          "Line",
+          46
+        ],
+        [
+          "Text",
+          12
+        ],
+        [
+          "ListItem",
+          8
+        ],
+        [
+          "Reference",
+          7
+        ],
+        [
+          "SectionHeader",
+          5
+        ],
+        [
+          "PageFooter",
+          2
+        ],
+        [
+          "ListGroup",
+          2
+        ],
+        [
+          "PageHeader",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 5,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          147
+        ],
+        [
+          "Line",
+          39
+        ],
+        [
+          "TableCell",
+          27
+        ],
+        [
+          "Text",
+          12
+        ],
+        [
+          "ListItem",
+          4
+        ],
+        [
+          "SectionHeader",
+          3
+        ],
+        [
+          "Table",
+          2
+        ],
+        [
+          "PageFooter",
+          2
+        ],
+        [
+          "ListGroup",
+          2
+        ],
+        [
+          "PageHeader",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 6,
+      "text_extraction_method": "surya",
+      "block_counts": [
+        [
+          "Span",
+          22
+        ],
+        [
+          "Line",
+          20
+        ],
+        [
+          "TableCell",
+          20
+        ],
+        [
+          "Text",
+          11
+        ],
+        [
+          "ListItem",
+          4
+        ],
+        [
+          "SectionHeader",
+          2
+        ],
+        [
+          "PageHeader",
+          1
+        ],
+        [
+          "Equation",
+          1
+        ],
+        [
+          "Table",
+          1
+        ],
+        [
+          "Footnote",
+          1
+        ],
+        [
+          "TableGroup",
+          1
+        ],
+        [
+          "ListGroup",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 7,
+      "text_extraction_method": "surya",
+      "block_counts": [
+        [
+          "TableCell",
+          131
+        ],
+        [
+          "Line",
+          3
+        ],
+        [
+          "Span",
+          3
+        ],
+        [
+          "Text",
+          2
+        ],
+        [
+          "PageHeader",
+          1
+        ],
+        [
+          "Table",
+          1
+        ],
+        [
+          "SectionHeader",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 8,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          144
+        ],
+        [
+          "Line",
+          42
+        ],
+        [
+          "Text",
+          9
+        ],
+        [
+          "ListItem",
+          6
+        ],
+        [
+          "SectionHeader",
+          4
+        ],
+        [
+          "ListGroup",
+          3
+        ],
+        [
+          "PageFooter",
+          2
+        ],
+        [
+          "PageHeader",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    },
+    {
+      "page_id": 9,
+      "text_extraction_method": "pdftext",
+      "block_counts": [
+        [
+          "Span",
+          154
+        ],
+        [
+          "Line",
+          46
+        ],
+        [
+          "Text",
+          11
+        ],
+        [
+          "ListItem",
+          6
+        ],
+        [
+          "ListGroup",
+          2
+        ],
+        [
+          "PageHeader",
+          1
+        ],
+        [
+          "SectionHeader",
+          1
+        ]
+      ],
+      "block_metadata": {
+        "llm_request_count": 0,
+        "llm_error_count": 0,
+        "llm_tokens_used": 0,
+        "previous_text": "",
+        "previous_type": "",
+        "previous_order": 0
+      }
+    }
+  ],
+  "debug_data_path": "debug_data/ASHRAE-D-86870-test-10pages"
+}

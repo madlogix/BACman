@@ -35,3 +35,18 @@ sdkconfig.old
 
 # Logs
 *.log
+
+# Capture files
+*.cap
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*-venv/
+venv/
+.venv/
+
+# Compiled test binaries
+crc_test
+state_machine_test
