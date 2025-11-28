@@ -295,6 +295,29 @@ Check that `Trpfm` (Reply to Poll For Master timing) stays < 10ms and `Retries` 
 
 See `MSTP_TIMING_FIX_PROGRESS.md` for full details on this fix.
 
+### Logging Levels for Debugging
+
+The gateway uses Rust's `log` crate with optimized log levels for performance:
+
+| Level | What it shows | Use case |
+|-------|---------------|----------|
+| `trace` | Packet-level details (every frame, queue ops, RX/TX) | Deep protocol debugging |
+| `debug` | Protocol events (state transitions, Who-Is-Router) | General debugging |
+| `info` | Important events (startup, errors, new masters) | Normal operation |
+
+**To enable verbose logging**, set the log level in `sdkconfig.defaults` or at runtime:
+```
+# For packet-level debugging (very verbose)
+CONFIG_LOG_DEFAULT_LEVEL_DEBUG=y
+
+# Or set RUST_LOG environment variable (if supported by build)
+RUST_LOG=trace   # All packet details
+RUST_LOG=debug   # Protocol events
+RUST_LOG=info    # Normal (default)
+```
+
+**Note:** Hot-path logging uses `trace!()` to avoid performance impact during normal operation. Only enable `trace` level when actively debugging packet issues.
+
 ---
 
 ### MS/TP Token Passing
