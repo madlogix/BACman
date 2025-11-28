@@ -545,17 +545,20 @@ fn main() -> anyhow::Result<()> {
         if wifi_check_counter >= WIFI_CHECK_INTERVAL {
             wifi_check_counter = 0;
 
-            if let Ok(mut wifi_guard) = wifi.lock() {
-                let connected = check_wifi_connection(&mut wifi_guard);
-                if status.wifi_connected != connected {
-                    status.wifi_connected = connected;
-                    // Force display update when WiFi status changes
-                    if current_screen != DisplayScreen::Splash {
-                        lcd.clear_and_reset().ok();
-                    }
-                    // Update web state (non-blocking)
-                    if let Ok(mut web) = web_state.try_lock() {
-                        web.wifi_connected = connected;
+            // In AP mode, skip station connection check
+            if !AP_MODE_ACTIVE.load(Ordering::SeqCst) {
+                if let Ok(mut wifi_guard) = wifi.lock() {
+                    let connected = check_wifi_connection(&mut wifi_guard);
+                    if status.wifi_connected != connected {
+                        status.wifi_connected = connected;
+                        // Force display update when WiFi status changes
+                        if current_screen != DisplayScreen::Splash {
+                            lcd.clear_and_reset().ok();
+                        }
+                        // Update web state (non-blocking)
+                        if let Ok(mut web) = web_state.try_lock() {
+                            web.wifi_connected = connected;
+                        }
                     }
                 }
             }
@@ -580,13 +583,23 @@ fn main() -> anyhow::Result<()> {
                     info!("Switching to AP mode...");
                     if let Ok(mut wifi_guard) = wifi.lock() {
                         match switch_to_ap_mode(&mut wifi_guard, &config.ap_ssid, &config.ap_password) {
-                            Ok(_) => {
+                            Ok(ap_ip_str) => {
                                 AP_MODE_ACTIVE.store(true, Ordering::SeqCst);
                                 WIFI_CONNECTED.store(false, Ordering::SeqCst);
                                 status.ap_mode_active = true;
                                 status.wifi_connected = false;
-                                status.ip_address = AP_IP_ADDRESS.to_string();
-                                info!("AP mode activated: SSID={}", config.ap_ssid);
+                                status.ip_address = ap_ip_str.clone();
+                                status.ap_ip = ap_ip_str.clone();
+
+                                // Update gateway's local IP for AP mode
+                                if let Ok(mut gw) = gateway.lock() {
+                                    if let Ok(ap_ip) = ap_ip_str.parse::<std::net::Ipv4Addr>() {
+                                        let ap_mask = std::net::Ipv4Addr::new(255, 255, 255, 0);
+                                        gw.set_local_ip(ap_ip, ap_mask);
+                                    }
+                                }
+
+                                info!("AP mode activated: SSID={}, IP={}", config.ap_ssid, ap_ip_str);
                             }
                             Err(e) => {
                                 error!("Failed to switch to AP mode: {}", e);
@@ -603,7 +616,16 @@ fn main() -> anyhow::Result<()> {
                                 WIFI_CONNECTED.store(true, Ordering::SeqCst);
                                 status.ap_mode_active = false;
                                 status.wifi_connected = true;
-                                status.ip_address = ip;
+                                status.ip_address = ip.clone();
+
+                                // Update gateway's local IP for station mode
+                                if let Ok(mut gw) = gateway.lock() {
+                                    if let Ok(sta_ip) = ip.parse::<std::net::Ipv4Addr>() {
+                                        let sta_mask = std::net::Ipv4Addr::new(255, 255, 255, 0);
+                                        gw.set_local_ip(sta_ip, sta_mask);
+                                    }
+                                }
+
                                 info!("Station mode activated");
                             }
                             Err(e) => {
@@ -779,11 +801,12 @@ fn check_wifi_connection(wifi: &mut BlockingWifi<EspWifi<'static>>) -> bool {
 }
 
 /// Switch WiFi to Access Point mode
+/// Returns the AP's IP address string on success
 fn switch_to_ap_mode(
     wifi: &mut BlockingWifi<EspWifi<'static>>,
     ap_ssid: &str,
     ap_password: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<String> {
     info!("Configuring WiFi Access Point mode...");
 
     // Stop current WiFi operation
@@ -804,8 +827,13 @@ fn switch_to_ap_mode(
     wifi.set_configuration(&Configuration::AccessPoint(ap_config))?;
     wifi.start()?;
 
-    info!("WiFi AP started: SSID='{}', IP={}", ap_ssid, AP_IP_ADDRESS);
-    Ok(())
+    // Get the actual AP IP address from netif
+    let ap_netif = wifi.wifi().ap_netif();
+    let ip_info = ap_netif.get_ip_info()?;
+    let ip_str = format!("{}", ip_info.ip);
+
+    info!("WiFi AP started: SSID='{}', IP={}", ap_ssid, ip_str);
+    Ok(ip_str)
 }
 
 /// Switch WiFi back to Station (client) mode

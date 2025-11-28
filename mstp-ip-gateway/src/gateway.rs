@@ -240,6 +240,17 @@ impl BacnetGateway {
         info!("Updated subnet mask to {}, broadcast: {}", mask, broadcast);
     }
 
+    /// Update the local IP address (used when switching between station and AP mode)
+    pub fn set_local_ip(&mut self, ip: Ipv4Addr, mask: Ipv4Addr) {
+        self.local_ip = ip;
+        self.subnet_mask = mask;
+        let broadcast = Self::calculate_broadcast_address(ip, mask);
+        info!(
+            "Updated gateway local IP to {}, subnet {}, broadcast {}",
+            ip, mask, broadcast
+        );
+    }
+
     /// Set custom address aging timeout
     pub fn set_address_max_age(&mut self, max_age: Duration) {
         self.address_max_age = max_age;
