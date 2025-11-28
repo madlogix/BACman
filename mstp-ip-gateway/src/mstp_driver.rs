@@ -221,7 +221,7 @@ impl<'a> MstpDriver<'a> {
             return Err(MstpError::BufferFull);
         }
 
-        info!("QUEUE: Adding {} bytes to send_queue for dest={}, queue_len_after={}, state={:?}",
+        trace!("QUEUE: Adding {} bytes to send_queue for dest={}, queue_len_after={}, state={:?}",
               data.len(), destination, self.send_queue.len() + 1, self.state);
         self.send_queue.push_back((data.to_vec(), destination, expecting_reply));
         Ok(())
@@ -243,7 +243,7 @@ impl<'a> MstpDriver<'a> {
         // Return any received data frames
         let result = self.receive_queue.pop_front();
         if let Some((ref data, source)) = result {
-            info!(">>> receive_frame() returning {} bytes from MAC {}, queue remaining: {}",
+            trace!(">>> receive_frame() returning {} bytes from MAC {}, queue remaining: {}",
                   data.len(), source, self.receive_queue.len());
         }
         Ok(result)
@@ -307,7 +307,7 @@ impl<'a> MstpDriver<'a> {
                 Some(pos) => {
                     // Discard bytes before preamble
                     if pos > 0 {
-                        info!("RX_DISCARD: {} bytes before preamble: {:02X?}",
+                        trace!("RX_DISCARD: {} bytes before preamble: {:02X?}",
                                pos, &self.rx_buffer[..pos.min(16)]);
                         self.rx_buffer.drain(..pos);
                     }
@@ -319,7 +319,7 @@ impl<'a> MstpDriver<'a> {
                         let keep = self.rx_buffer.len() - 1;
                         // Log what we're discarding if it's significant
                         if keep > 4 {
-                            info!("RX_DISCARD: No preamble, discarding {} bytes: {:02X?}",
+                            trace!("RX_DISCARD: No preamble, discarding {} bytes: {:02X?}",
                                    keep, &self.rx_buffer[..keep.min(16)]);
                         }
                         self.rx_buffer.drain(..keep);
@@ -383,15 +383,15 @@ impl<'a> MstpDriver<'a> {
             if frame_type == 5 || frame_type == 6 || data_len > 0 {
                 let have_bytes = self.rx_buffer.len();
                 let raw_preview = have_bytes.min(35);
-                info!(">>> BACNET DATA FRAME: type={} src={} dest={} data_len={} need={} have={}",
+                trace!(">>> BACNET DATA FRAME: type={} src={} dest={} data_len={} need={} have={}",
                       frame_type, source, dest, data_len, frame_size, have_bytes);
-                info!(">>> RAW BUFFER ({} bytes): {:02X?}", have_bytes, &self.rx_buffer[..raw_preview]);
+                trace!(">>> RAW BUFFER ({} bytes): {:02X?}", have_bytes, &self.rx_buffer[..raw_preview]);
             }
 
             // Wait for complete frame
             if self.rx_buffer.len() < frame_size {
                 if data_len > 0 {
-                    info!(">>> Waiting for {} more bytes (have {}, need {})",
+                    trace!(">>> Waiting for {} more bytes (have {}, need {})",
                           frame_size - self.rx_buffer.len(), self.rx_buffer.len(), frame_size);
                 }
                 return Ok(());
@@ -507,7 +507,7 @@ impl<'a> MstpDriver<'a> {
             Some(MstpFrameType::Token) => {
                 if dest == self.station_address {
                     // We received the token - transition to UseToken
-                    info!("Received Token from station {} (in Idle)", source);
+                    debug!("Received Token from station {} (in Idle)", source);
                     self.token_count += 1;
                     self.tokens_received += 1;
                     self.frame_count = 0;
@@ -592,13 +592,13 @@ impl<'a> MstpDriver<'a> {
             Some(MstpFrameType::BacnetDataExpectingReply) => {
                 if dest == self.station_address {
                     // Transition to AnswerDataRequest
-                    info!("Received BACnet data (expecting reply) from station {}, {} bytes", source, data.len());
+                    trace!("Received BACnet data (expecting reply) from station {}, {} bytes", source, data.len());
                     self.pending_request = Some((data, source));
                     self.reply_delay_timer = Some(Instant::now());
                     self.state = MstpState::AnswerDataRequest;
                 } else if dest == MSTP_BROADCAST_ADDRESS {
                     // Broadcast data expecting reply - just queue it
-                    info!("Received BACnet broadcast data from station {}, {} bytes", source, data.len());
+                    trace!("Received BACnet broadcast data from station {}, {} bytes", source, data.len());
                     if self.receive_queue.len() < 16 {
                         self.receive_queue.push_back((data, source));
                     }
@@ -607,12 +607,12 @@ impl<'a> MstpDriver<'a> {
             Some(MstpFrameType::BacnetDataNotExpectingReply) => {
                 if dest == self.station_address || dest == MSTP_BROADCAST_ADDRESS {
                     // Queue for upper layer
-                    info!("Received BACnet data from station {}, {} bytes (dest={})", source, data.len(), dest);
+                    trace!("Received BACnet data from station {}, {} bytes (dest={})", source, data.len(), dest);
                     if self.receive_queue.len() < 16 {
                         let preview_len = data.len().min(20);
-                        info!(">>> QUEUING DATA for upper layer: {} bytes, NPDU preview: {:02X?}", data.len(), &data[..preview_len]);
+                        trace!(">>> QUEUING DATA for upper layer: {} bytes, NPDU preview: {:02X?}", data.len(), &data[..preview_len]);
                         self.receive_queue.push_back((data, source));
-                        info!(">>> QUEUE now has {} items", self.receive_queue.len());
+                        trace!(">>> QUEUE now has {} items", self.receive_queue.len());
                     } else {
                         warn!(">>> QUEUE FULL - dropping frame!");
                     }
@@ -834,14 +834,14 @@ impl<'a> MstpDriver<'a> {
                 // We have the token, send data if available
                 if self.frame_count < self.max_info_frames {
                     if let Some((data, dest, expecting_reply)) = self.send_queue.pop_front() {
-                        info!("UseToken: Sending {} bytes to dest={} (expecting_reply={})",
+                        trace!("UseToken: Sending {} bytes to dest={} (expecting_reply={})",
                               data.len(), dest, expecting_reply);
                         self.send_data_frame(&data, dest, expecting_reply)?;
                         self.frame_count += 1;
 
                         if expecting_reply {
                             // Transition to WaitForReply
-                            info!("Sent frame expecting reply, transitioning to WaitForReply");
+                            debug!("Sent frame expecting reply, transitioning to WaitForReply");
                             self.reply_timer = Some(Instant::now());
                             self.state = MstpState::WaitForReply;
                         }
@@ -906,7 +906,7 @@ impl<'a> MstpDriver<'a> {
                         // Ready to send reply - queue the request for upper layer
                         if let Some((request_data, source)) = self.pending_request.take() {
                             if self.receive_queue.len() < 16 {
-                                info!("AnswerDataRequest: Queuing request ({} bytes from MAC {}) for processing",
+                                trace!("AnswerDataRequest: Queuing request ({} bytes from MAC {}) for processing",
                                       request_data.len(), source);
                                 self.receive_queue.push_back((request_data, source));
                             }
@@ -1071,7 +1071,7 @@ impl<'a> MstpDriver<'a> {
         if !skip_pre_log {
             // Log non-time-critical frames before TX
             if (ftype as u8) >= 5 {
-                info!("TX data frame: type={:?} dest={} len={} data={:02X?}",
+                trace!("TX data frame: type={:?} dest={} len={} data={:02X?}",
                       ftype, dest, data_len, &data[..data_len.min(20)]);
             } else {
                 debug!("TX control frame: type={:?} dest={}", ftype, dest);
@@ -1207,7 +1207,7 @@ impl<'a> MstpDriver<'a> {
             }
         }
         if total_received > 0 {
-            info!("RX during/after TX: {} total bytes", total_received);
+            trace!("RX during/after TX: {} total bytes", total_received);
 
             // CRITICAL FIX: Filter TX echo if present
             // Despite docs claiming SP485EEN doesn't echo, we're seeing our own transmissions
@@ -1220,7 +1220,7 @@ impl<'a> MstpDriver<'a> {
                     self.rx_buffer.drain(..tx_frame_copy.len());
                     total_received -= tx_frame_copy.len();
                     if total_received > 0 {
-                        info!("Remaining valid RX after echo removal: {} bytes", total_received);
+                        trace!("Remaining valid RX after echo removal: {} bytes", total_received);
                     }
                 }
             }

@@ -23,7 +23,7 @@ use esp_idf_svc::{
     nvs::EspDefaultNvsPartition,
     wifi::{AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi, AccessPointConfiguration},
 };
-use log::{error, info, warn};
+use log::{error, info, trace, warn};
 use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -981,12 +981,12 @@ fn mstp_receive_task(
                         // Send on MS/TP to the router (source_addr is the MAC of the router that sent us the request)
                         // The router will see DNET in the NPDU and forward it to the appropriate network
                         if let Ok(mut driver) = mstp_driver.lock() {
-                            info!("Sending I-Am on MS/TP to router MAC {}: {} bytes, NPDU: {:02X?}",
+                            trace!("Sending I-Am on MS/TP to router MAC {}: {} bytes, NPDU: {:02X?}",
                                   source_addr, routed_npdu.len(), &routed_npdu[..routed_npdu.len().min(30)]);
                             if let Err(e) = driver.send_frame(&routed_npdu, source_addr, false) {
                                 warn!("Failed to send I-Am to MS/TP router: {}", e);
                             } else {
-                                info!("I-Am queued for MS/TP transmission to router MAC {}", source_addr);
+                                trace!("I-Am queued for MS/TP transmission to router MAC {}", source_addr);
                             }
                         }
                     } else {
@@ -1298,7 +1298,7 @@ fn ip_receive_task(
                                   mstp_data.len(), mstp_dest, expecting_reply, &mstp_data[..mstp_data.len().min(20)]);
                             if let Ok(mut driver) = mstp_driver.lock() {
                                 match driver.send_frame(&mstp_data, mstp_dest, expecting_reply) {
-                                    Ok(_) => info!("IP->MS/TP frame queued successfully"),
+                                    Ok(_) => trace!("IP->MS/TP frame queued successfully"),
                                     Err(e) => warn!("Failed to send to MS/TP: {}", e),
                                 }
                             }
