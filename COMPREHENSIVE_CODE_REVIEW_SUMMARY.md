@@ -45,8 +45,8 @@ After Priority 1+2 Fixes (~20 hours):
 
 ## 🚀 FIX PROGRESS TRACKER
 
-**Last Updated:** 2025-11-29 (Issue #3 FIXED)
-**GitHub Commit:** `848a374` - try_into().unwrap() replaced with proper error handling
+**Last Updated:** 2025-11-29 (Issue #4 FIXED)
+**GitHub Commit:** TBD - Forwarded-NPDU now uses original source IP
 
 ### Phase 1 Progress (Critical Fixes)
 
@@ -55,10 +55,10 @@ After Priority 1+2 Fixes (~20 hours):
 | 1 | Bit string encoding (0x82→0x85) | ✅ FIXED | `51ec1fb` | Changed 0x82 to 0x85 in local_device.rs:780,787 |
 | 2 | Remove hardcoded WiFi credentials | ✅ FIXED | `0c7032b` | Changed to String::new() in config.rs:61-62 |
 | 3 | Fix try_into().unwrap() panic | ✅ FIXED | `848a374` | Replaced unwrap() with map_err() in main.rs:707,711 |
-| 4 | Forwarded-NPDU source IP | ⏳ PENDING | - | gateway.rs:398-422 |
+| 4 | Forwarded-NPDU source IP | ✅ FIXED | TBD | Added source_addr param per ASHRAE 135 Annex J.4.5 |
 | 5 | Implement FDT TTL enforcement | ⏳ PENDING | - | gateway.rs:650-687 |
 
-**Phase 1 Completion:** 3/5 (60%)
+**Phase 1 Completion:** 4/5 (80%)
 
 ### Phase 2 Progress (High Priority)
 
@@ -92,6 +92,7 @@ After Phase 2:     92% (A-)  [Projected]
 | 2025-11-29 | ✅ Issue #1 FIXED: Bit string encoding (0x82→0x85) | `51ec1fb` |
 | 2025-11-29 | ✅ Issue #2 FIXED: Removed hardcoded WiFi credentials | `0c7032b` |
 | 2025-11-29 | ✅ Issue #3 FIXED: Replaced try_into().unwrap() with proper error handling | `848a374` |
+| 2025-11-29 | ✅ Issue #4 FIXED: Forwarded-NPDU now uses original source IP per ASHRAE 135 J.4.5 | TBD |
 
 ---
 

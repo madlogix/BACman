@@ -365,7 +365,9 @@ impl BacnetGateway {
         )?;
 
         // Wrap in Forwarded-NPDU for routed messages (ASHRAE 135 Annex J.4.5)
-        let bvlc = self.build_forwarded_npdu(&routed_npdu);
+        // For MS/TP->IP routing, use gateway's IP as source (MS/TP devices have no IP)
+        let gateway_addr = SocketAddr::new(IpAddr::V4(self.local_ip), self.local_port);
+        let bvlc = self.build_forwarded_npdu(&routed_npdu, gateway_addr);
 
         // Send via IP
         trace!("MS/TP->IP: routing {} bytes to {} (BVLC: {:02X?})",
@@ -396,7 +398,14 @@ impl BacnetGateway {
     }
 
     /// Build a Forwarded-NPDU BVLC message (ASHRAE 135 Annex J.4.5)
-    fn build_forwarded_npdu(&self, npdu: &[u8]) -> Vec<u8> {
+    ///
+    /// Per ASHRAE 135 Annex J.4.5, Forwarded-NPDU messages MUST contain the
+    /// original source B/IP address, not the gateway's address.
+    ///
+    /// # Arguments
+    /// * `npdu` - The NPDU data to forward
+    /// * `source_addr` - Original source B/IP address (IP:port)
+    fn build_forwarded_npdu(&self, npdu: &[u8], source_addr: SocketAddr) -> Vec<u8> {
         // Forwarded-NPDU format:
         // 0x81 (BVLC type)
         // 0x04 (Forwarded-NPDU function)
@@ -412,10 +421,16 @@ impl BacnetGateway {
         result.push((length >> 8) as u8);
         result.push((length & 0xFF) as u8);
 
-        // Original source address (our local address)
-        result.extend_from_slice(&self.local_ip.octets());
-        result.push((self.local_port >> 8) as u8);
-        result.push((self.local_port & 0xFF) as u8);
+        // Original source address (from parameter, not gateway address)
+        if let IpAddr::V4(ipv4) = source_addr.ip() {
+            result.extend_from_slice(&ipv4.octets());
+        } else {
+            // Fallback for IPv6 (should not happen in BACnet/IP)
+            result.extend_from_slice(&self.local_ip.octets());
+        }
+        let port = source_addr.port();
+        result.push((port >> 8) as u8);
+        result.push((port & 0xFF) as u8);
 
         // NPDU
         result.extend_from_slice(npdu);
@@ -497,7 +512,9 @@ impl BacnetGateway {
             _ => {
                 // Forward other network messages to IP side
                 let routed_npdu = build_routed_npdu(data, self.mstp_network, &[_source_addr], npdu, false)?;
-                let bvlc = self.build_forwarded_npdu(&routed_npdu);
+                // For MS/TP->IP routing, use gateway's IP as source (MS/TP devices have no IP)
+                let gateway_addr = SocketAddr::new(IpAddr::V4(self.local_ip), self.local_port);
+                let bvlc = self.build_forwarded_npdu(&routed_npdu, gateway_addr);
                 let dest = self.get_broadcast_address();
                 self.send_ip_packet(&bvlc, dest)?;
             }
@@ -749,7 +766,8 @@ impl BacnetGateway {
         let npdu_data = &data[4..];
 
         // Forward as Forwarded-NPDU to local broadcast and other foreign devices
-        let forwarded = self.build_forwarded_npdu(npdu_data);
+        // CRITICAL: Use original sender's address per ASHRAE 135 Annex J.4.5
+        let forwarded = self.build_forwarded_npdu(npdu_data, source_addr);
         let broadcast_addr = self.get_broadcast_address();
         self.send_ip_packet(&forwarded, broadcast_addr)?;
 
