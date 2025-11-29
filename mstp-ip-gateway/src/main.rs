@@ -704,10 +704,12 @@ fn init_wifi_with_retry(
     )?;
 
     let wifi_configuration = Configuration::Client(ClientConfiguration {
-        ssid: ssid.try_into().unwrap(),
+        ssid: ssid.try_into()
+            .map_err(|_| anyhow::anyhow!("WiFi SSID exceeds maximum length (32 characters)"))?,
         bssid: None,
         auth_method: AuthMethod::WPA2Personal,
-        password: password.try_into().unwrap(),
+        password: password.try_into()
+            .map_err(|_| anyhow::anyhow!("WiFi password exceeds maximum length (64 characters)"))?,
         channel: None,
         ..Default::default()
     });
