@@ -777,14 +777,14 @@ impl LocalDevice {
                 bits[1] |= 0x02; // ReadPropertyMultiple (bit 14)
                 bits[3] |= 0x20; // I-Am (bit 26)
                 bits[4] |= 0x40; // Who-Is (bit 33)
-                let mut v = vec![0x82, 0x07, 0x00];
+                let mut v = vec![0x85, 0x07, 0x00]; // Tag 8 (BitString), length=7 (extended), 0 unused bits
                 v.extend_from_slice(&bits);
                 Some(v)
             }
             PROP_PROTOCOL_OBJECT_TYPES_SUPPORTED => {
                 let mut bits = [0u8; 7];
                 bits[1] |= 0x80; // Device (bit 8)
-                let mut v = vec![0x82, 0x08, 0x00];
+                let mut v = vec![0x85, 0x08, 0x00]; // Tag 8 (BitString), length=8 (extended), 0 unused bits
                 v.extend_from_slice(&bits);
                 Some(v)
             }
