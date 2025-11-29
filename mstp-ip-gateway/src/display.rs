@@ -269,10 +269,15 @@ where
             self.clear()?;
             self.draw_static_layout()?;
 
-            // Draw all values
-            let wifi_text = if status.wifi_connected { "OK" } else { "--" };
-            let wifi_style = if status.wifi_connected { green } else { yellow };
-            self.draw_value(10, 35, 230, &format!("WiFi:{} {}", wifi_text, status.ip_address), wifi_style)?;
+            // Draw all values - show mode (AP/STA) and IP
+            let (mode_text, wifi_style) = if status.ap_mode_active {
+                ("AP", green)  // AP mode is always "connected" when active
+            } else if status.wifi_connected {
+                ("STA", green)
+            } else {
+                ("---", yellow)
+            };
+            self.draw_value(10, 35, 230, &format!("{}:{}", mode_text, status.ip_address), wifi_style)?;
 
             let net_text = format!("{}<->{}", status.mstp_network, status.ip_network);
             self.draw_value(34, 55, 80, &net_text, white)?;
@@ -293,11 +298,16 @@ where
         // Clone last_status to avoid borrow checker issues
         let last = self.last_status.clone().unwrap();
 
-        // WiFi status
-        if last.wifi_connected != status.wifi_connected || last.ip_address != status.ip_address {
-            let wifi_text = if status.wifi_connected { "OK" } else { "--" };
-            let wifi_style = if status.wifi_connected { green } else { yellow };
-            self.draw_value(10, 35, 230, &format!("WiFi:{} {}", wifi_text, status.ip_address), wifi_style)?;
+        // WiFi mode and status
+        if last.wifi_connected != status.wifi_connected || last.ip_address != status.ip_address || last.ap_mode_active != status.ap_mode_active {
+            let (mode_text, wifi_style) = if status.ap_mode_active {
+                ("AP", green)
+            } else if status.wifi_connected {
+                ("STA", green)
+            } else {
+                ("---", yellow)
+            };
+            self.draw_value(10, 35, 230, &format!("{}:{}", mode_text, status.ip_address), wifi_style)?;
         }
 
         // Network numbers (rarely change)

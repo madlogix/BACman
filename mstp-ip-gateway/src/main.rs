@@ -59,9 +59,6 @@ const WATCHDOG_TIMEOUT_SECS: u64 = 30;
 /// Router announcement interval in loop iterations (30 seconds = 3000 iterations at 10ms)
 const ROUTER_ANNOUNCE_INTERVAL: u64 = 3000;
 
-/// Long-press threshold in loop iterations (1 second = 10 iterations at 100ms)
-const LONG_PRESS_THRESHOLD: u32 = 10;
-
 /// Default AP mode IP address
 const AP_IP_ADDRESS: &str = "192.168.4.1";
 
@@ -340,7 +337,6 @@ fn main() -> anyhow::Result<()> {
     // Display screen cycling with Button A
     let mut current_screen = DisplayScreen::Status;
     let mut btn_a_was_pressed = false;
-    let mut btn_a_press_count: u32 = 0;  // Track how long button A is held
     let mut btn_b_was_pressed = false;
     let mut btn_c_was_pressed = false;
 
@@ -545,8 +541,15 @@ fn main() -> anyhow::Result<()> {
         if wifi_check_counter >= WIFI_CHECK_INTERVAL {
             wifi_check_counter = 0;
 
-            // In AP mode, skip station connection check
-            if !AP_MODE_ACTIVE.load(Ordering::SeqCst) {
+            // In AP mode, update client count; in STA mode, check connection
+            if AP_MODE_ACTIVE.load(Ordering::SeqCst) {
+                // Query AP client count from ESP-IDF using sta_list
+                let mut sta_list: esp_idf_sys::wifi_sta_list_t = unsafe { std::mem::zeroed() };
+                unsafe {
+                    esp_idf_sys::esp_wifi_ap_get_sta_list(&mut sta_list);
+                }
+                status.ap_clients = sta_list.num as u8;
+            } else {
                 if let Ok(mut wifi_guard) = wifi.lock() {
                     let connected = check_wifi_connection(&mut wifi_guard);
                     if status.wifi_connected != connected {
@@ -564,105 +567,87 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        // Handle button A (front big button)
-        // - Short press: cycle through screens
-        // - Long press (on APConfig screen): toggle AP mode
+        // Handle button A (front big button) - cycle through screens
         let btn_a_pressed = btn_a.is_low();
-        if btn_a_pressed {
-            btn_a_press_count += 1;
-
-            // Check for long press on APConfig screen
-            if btn_a_press_count == LONG_PRESS_THRESHOLD && current_screen == DisplayScreen::APConfig {
-                info!("Long press detected on APConfig screen - toggling AP mode");
-
-                // Toggle AP mode
-                let new_ap_mode = !AP_MODE_ACTIVE.load(Ordering::SeqCst);
-
-                if new_ap_mode {
-                    // Switch to AP mode
-                    info!("Switching to AP mode...");
-                    if let Ok(mut wifi_guard) = wifi.lock() {
-                        match switch_to_ap_mode(&mut wifi_guard, &config.ap_ssid, &config.ap_password) {
-                            Ok(ap_ip_str) => {
-                                AP_MODE_ACTIVE.store(true, Ordering::SeqCst);
-                                WIFI_CONNECTED.store(false, Ordering::SeqCst);
-                                status.ap_mode_active = true;
-                                status.wifi_connected = false;
-                                status.ip_address = ap_ip_str.clone();
-                                status.ap_ip = ap_ip_str.clone();
-
-                                // Update gateway's local IP for AP mode
-                                if let Ok(mut gw) = gateway.lock() {
-                                    if let Ok(ap_ip) = ap_ip_str.parse::<std::net::Ipv4Addr>() {
-                                        let ap_mask = std::net::Ipv4Addr::new(255, 255, 255, 0);
-                                        gw.set_local_ip(ap_ip, ap_mask);
-                                    }
-                                }
-
-                                info!("AP mode activated: SSID={}, IP={}", config.ap_ssid, ap_ip_str);
-                            }
-                            Err(e) => {
-                                error!("Failed to switch to AP mode: {}", e);
-                            }
-                        }
-                    }
-                } else {
-                    // Switch back to Station mode
-                    info!("Switching back to Station mode...");
-                    if let Ok(mut wifi_guard) = wifi.lock() {
-                        match switch_to_sta_mode(&mut wifi_guard, &config.wifi_ssid, &config.wifi_password) {
-                            Ok(ip) => {
-                                AP_MODE_ACTIVE.store(false, Ordering::SeqCst);
-                                WIFI_CONNECTED.store(true, Ordering::SeqCst);
-                                status.ap_mode_active = false;
-                                status.wifi_connected = true;
-                                status.ip_address = ip.clone();
-
-                                // Update gateway's local IP for station mode
-                                if let Ok(mut gw) = gateway.lock() {
-                                    if let Ok(sta_ip) = ip.parse::<std::net::Ipv4Addr>() {
-                                        let sta_mask = std::net::Ipv4Addr::new(255, 255, 255, 0);
-                                        gw.set_local_ip(sta_ip, sta_mask);
-                                    }
-                                }
-
-                                info!("Station mode activated");
-                            }
-                            Err(e) => {
-                                error!("Failed to switch to Station mode: {}", e);
-                                // Stay in AP mode if switching fails
-                            }
-                        }
-                    }
-                }
-
-                // Force display update
-                lcd.clear_and_reset().ok();
-            }
-        } else {
-            // Button released
-            if btn_a_was_pressed && btn_a_press_count < LONG_PRESS_THRESHOLD {
-                // Short press - cycle screens
-                current_screen = current_screen.next();
-                info!("Button A short press - screen: {:?}", current_screen);
-                // Force full redraw when switching screens
-                lcd.clear_and_reset().ok();
-                if current_screen == DisplayScreen::Splash {
-                    lcd.show_splash_screen().ok();
-                }
-            }
-            btn_a_press_count = 0;
-        }
-        btn_a_was_pressed = btn_a_pressed;
-
-        // Handle button B (side) - force current screen refresh
-        let btn_b_pressed = btn_b.is_low();
-        if btn_b_pressed && !btn_b_was_pressed {
-            info!("Button B pressed - refresh display");
+        if !btn_a_pressed && btn_a_was_pressed {
+            // Button released - cycle to next screen
+            current_screen = current_screen.next();
+            info!("Button A - screen: {:?}", current_screen);
             lcd.clear_and_reset().ok();
             if current_screen == DisplayScreen::Splash {
                 lcd.show_splash_screen().ok();
             }
+        }
+        btn_a_was_pressed = btn_a_pressed;
+
+        // Handle button B (side) - toggle AP/Station mode
+        let btn_b_pressed = btn_b.is_low();
+        if btn_b_pressed && !btn_b_was_pressed {
+            info!("Button B pressed - toggling WiFi mode");
+
+            // Toggle AP mode
+            let new_ap_mode = !AP_MODE_ACTIVE.load(Ordering::SeqCst);
+
+            if new_ap_mode {
+                // Switch to AP mode
+                info!("Switching to AP mode...");
+                if let Ok(mut wifi_guard) = wifi.lock() {
+                    match switch_to_ap_mode(&mut wifi_guard, &config.ap_ssid, &config.ap_password) {
+                        Ok(ap_ip_str) => {
+                            AP_MODE_ACTIVE.store(true, Ordering::SeqCst);
+                            WIFI_CONNECTED.store(false, Ordering::SeqCst);
+                            status.ap_mode_active = true;
+                            status.wifi_connected = false;
+                            status.ip_address = ap_ip_str.clone();
+                            status.ap_ip = ap_ip_str.clone();
+
+                            // Update gateway's local IP for AP mode
+                            if let Ok(mut gw) = gateway.lock() {
+                                if let Ok(ap_ip) = ap_ip_str.parse::<std::net::Ipv4Addr>() {
+                                    let ap_mask = std::net::Ipv4Addr::new(255, 255, 255, 0);
+                                    gw.set_local_ip(ap_ip, ap_mask);
+                                }
+                            }
+
+                            info!("AP mode activated: SSID={}, IP={}", config.ap_ssid, ap_ip_str);
+                        }
+                        Err(e) => {
+                            error!("Failed to switch to AP mode: {}", e);
+                        }
+                    }
+                }
+            } else {
+                // Switch back to Station mode
+                info!("Switching back to Station mode...");
+                if let Ok(mut wifi_guard) = wifi.lock() {
+                    match switch_to_sta_mode(&mut wifi_guard, &config.wifi_ssid, &config.wifi_password) {
+                        Ok(ip) => {
+                            AP_MODE_ACTIVE.store(false, Ordering::SeqCst);
+                            WIFI_CONNECTED.store(true, Ordering::SeqCst);
+                            status.ap_mode_active = false;
+                            status.wifi_connected = true;
+                            status.ip_address = ip.clone();
+
+                            // Update gateway's local IP for station mode
+                            if let Ok(mut gw) = gateway.lock() {
+                                if let Ok(sta_ip) = ip.parse::<std::net::Ipv4Addr>() {
+                                    let sta_mask = std::net::Ipv4Addr::new(255, 255, 255, 0);
+                                    gw.set_local_ip(sta_ip, sta_mask);
+                                }
+                            }
+
+                            info!("Station mode activated");
+                        }
+                        Err(e) => {
+                            error!("Failed to switch to Station mode: {}", e);
+                            // Stay in AP mode if switching fails
+                        }
+                    }
+                }
+            }
+
+            // Force display update
+            lcd.clear_and_reset().ok();
         }
         btn_b_was_pressed = btn_b_pressed;
 
