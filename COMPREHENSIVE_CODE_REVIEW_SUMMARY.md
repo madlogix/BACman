@@ -46,7 +46,7 @@ After Priority 1+2 Fixes (~20 hours):
 ## 🚀 FIX PROGRESS TRACKER
 
 **Last Updated:** 2025-11-29 (Phase 2 - 87.5% Complete!)
-**GitHub Commit:** TBD - Phase 2 improvements
+**GitHub Commit:** `1a7618f` - Phase 2 improvements
 
 ### Phase 1 Progress (Critical Fixes)
 
@@ -64,12 +64,12 @@ After Priority 1+2 Fixes (~20 hours):
 
 | # | Issue | Status | Commit | Notes |
 |---|-------|--------|--------|-------|
-| 6 | Add Error trait implementations | ✅ FIXED | TBD | Added to GatewayError and MstpError |
-| 7 | Fix display status cloning | ✅ FIXED | TBD | Changed clone() to take() for efficiency |
-| 8 | Add safety documentation | ✅ FIXED | TBD | Documented all unsafe blocks |
-| 9 | Add input validation to web forms | ✅ FIXED | TBD | Added BACnet-compliant validation |
-| 10 | Implement missing Reject codes | ✅ FIXED | TBD | Added #[allow(dead_code)] - codes defined per standard |
-| 11 | Add FDT capacity limit | ✅ FIXED | TBD | Max 255 entries, rejects with NAK when full |
+| 6 | Add Error trait implementations | ✅ FIXED | `1a7618f` | Added to GatewayError and MstpError |
+| 7 | Fix display status cloning | ✅ FIXED | `1a7618f` | Changed clone() to take() for efficiency |
+| 8 | Add safety documentation | ✅ FIXED | `1a7618f` | Documented all unsafe blocks |
+| 9 | Add input validation to web forms | ✅ FIXED | `1a7618f` | Added BACnet-compliant validation |
+| 10 | Implement missing Reject codes | ✅ FIXED | `1a7618f` | Added #[allow(dead_code)] - codes defined per standard |
+| 11 | Add FDT capacity limit | ✅ FIXED | `1a7618f` | Max 255 entries, rejects with NAK when full |
 | 12 | Fix WAIT_FOR_REPLY negative list | ✅ VERIFIED | (already implemented) | Correct negative list approach in place |
 | 13 | Add HTTP authentication | ⏳ DEFERRED | - | Complex security feature, requires careful planning |
 
@@ -95,7 +95,7 @@ After Phase 2:     92% (A-)  [Projected]
 | 2025-11-29 | ✅ Issue #4 FIXED: Forwarded-NPDU now uses original source IP per ASHRAE 135 J.4.5 | `5875f1f` |
 | 2025-11-29 | ✅ Issue #5 VERIFIED: FDT TTL enforcement already implemented | N/A |
 | 2025-11-29 | 🎉 **PHASE 1 COMPLETE** - All 5 critical issues fixed! | - |
-| 2025-11-29 | ✅ Phase 2 #6-11: Error traits, display optimization, safety docs, validation, FDT limit | TBD |
+| 2025-11-29 | ✅ Phase 2 #6-11: Error traits, display optimization, safety docs, validation, FDT limit | `1a7618f` |
 | 2025-11-29 | ✅ Issue #12 VERIFIED: WAIT_FOR_REPLY negative list already implemented | N/A |
 | 2025-11-29 | 📋 Issue #13 DEFERRED: HTTP authentication requires careful security design | - |
 
