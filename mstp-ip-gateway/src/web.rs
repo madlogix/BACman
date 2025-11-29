@@ -208,6 +208,8 @@ pub fn start_web_server(
         // Schedule reboot after response is sent
         std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_secs(2));
+            // SAFETY: esp_restart() is always safe to call on ESP32 - it performs a
+            // software reset. The 2-second delay ensures the HTTP response is sent.
             unsafe { esp_idf_svc::sys::esp_restart(); }
         });
 
@@ -325,7 +327,13 @@ pub fn start_web_server(
     Ok(server)
 }
 
-/// Parse URL-encoded form data
+/// Valid MS/TP baud rates per ASHRAE 135
+const VALID_MSTP_BAUD_RATES: [u32; 5] = [9600, 19200, 38400, 76800, 115200];
+
+/// Maximum BACnet device instance (2^22 - 2)
+const MAX_DEVICE_INSTANCE: u32 = 4194302;
+
+/// Parse URL-encoded form data with validation
 fn parse_config_form(body: &str, config: &mut GatewayConfig) {
     for pair in body.split('&') {
         let mut parts = pair.splitn(2, '=');
@@ -334,21 +342,34 @@ fn parse_config_form(body: &str, config: &mut GatewayConfig) {
         let value = urlencoding::decode(value).unwrap_or_default();
 
         match key {
-            "wifi_ssid" => config.wifi_ssid = value.to_string(),
+            "wifi_ssid" => {
+                // SSID max 32 characters
+                if value.len() <= 32 {
+                    config.wifi_ssid = value.to_string();
+                }
+            }
             "wifi_pass" => {
                 // Only update if not empty (allows keeping existing password)
-                if !value.is_empty() {
+                // WPA2 requires 8-63 characters
+                if !value.is_empty() && value.len() >= 8 && value.len() <= 63 {
                     config.wifi_password = value.to_string();
                 }
             }
-            "ap_ssid" => config.ap_ssid = value.to_string(),
+            "ap_ssid" => {
+                // SSID max 32 characters
+                if value.len() <= 32 && !value.is_empty() {
+                    config.ap_ssid = value.to_string();
+                }
+            }
             "ap_pass" => {
                 // Only update if not empty (allows keeping existing password)
-                if !value.is_empty() {
+                // WPA2 requires 8-63 characters
+                if !value.is_empty() && value.len() >= 8 && value.len() <= 63 {
                     config.ap_password = value.to_string();
                 }
             }
             "mstp_addr" => {
+                // MS/TP master address: 0-127
                 if let Ok(v) = value.parse::<u8>() {
                     if v <= 127 {
                         config.mstp_address = v;
@@ -356,38 +377,59 @@ fn parse_config_form(body: &str, config: &mut GatewayConfig) {
                 }
             }
             "mstp_max" => {
+                // MS/TP max master: 0-127, must be >= mstp_address
                 if let Ok(v) = value.parse::<u8>() {
-                    if v <= 127 {
+                    if v <= 127 && v >= config.mstp_address {
                         config.mstp_max_master = v;
                     }
                 }
             }
             "mstp_baud" => {
+                // Only accept valid MS/TP baud rates
                 if let Ok(v) = value.parse::<u32>() {
-                    config.mstp_baud_rate = v;
+                    if VALID_MSTP_BAUD_RATES.contains(&v) {
+                        config.mstp_baud_rate = v;
+                    }
                 }
             }
             "mstp_net" => {
+                // BACnet network number: 1-65534 (0 and 65535 reserved)
                 if let Ok(v) = value.parse::<u16>() {
-                    config.mstp_network = v;
+                    if v >= 1 && v <= 65534 {
+                        config.mstp_network = v;
+                    }
                 }
             }
             "ip_port" => {
+                // Port must be > 0
                 if let Ok(v) = value.parse::<u16>() {
-                    config.bacnet_ip_port = v;
+                    if v > 0 {
+                        config.bacnet_ip_port = v;
+                    }
                 }
             }
             "ip_net" => {
+                // BACnet network number: 1-65534 (0 and 65535 reserved)
                 if let Ok(v) = value.parse::<u16>() {
-                    config.ip_network = v;
+                    if v >= 1 && v <= 65534 {
+                        config.ip_network = v;
+                    }
                 }
             }
             "dev_inst" => {
+                // Device instance: 0-4194302 (max per ASHRAE 135)
                 if let Ok(v) = value.parse::<u32>() {
-                    config.device_instance = v;
+                    if v <= MAX_DEVICE_INSTANCE {
+                        config.device_instance = v;
+                    }
                 }
             }
-            "dev_name" => config.device_name = value.to_string(),
+            "dev_name" => {
+                // Device name max 64 characters
+                if value.len() <= 64 && !value.is_empty() {
+                    config.device_name = value.to_string();
+                }
+            }
             _ => {}
         }
     }

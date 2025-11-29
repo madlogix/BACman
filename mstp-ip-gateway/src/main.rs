@@ -72,6 +72,8 @@ fn main() -> anyhow::Result<()> {
         error!("PANIC: {}", panic_info);
         error!("Restarting in 3 seconds...");
         thread::sleep(Duration::from_secs(3));
+        // SAFETY: esp_restart() is always safe to call on ESP32 - it performs a
+        // software reset. Used here to recover from panics automatically.
         unsafe { esp_idf_svc::sys::esp_restart(); }
     }));
 
@@ -171,6 +173,8 @@ fn main() -> anyhow::Result<()> {
         error!("WiFi initialization failed after retries: {}", e);
         error!("Restarting...");
         thread::sleep(Duration::from_secs(3));
+        // SAFETY: esp_restart() is always safe to call on ESP32 - it performs a
+        // software reset. Used here to retry WiFi initialization after failure.
         unsafe { esp_idf_svc::sys::esp_restart(); }
         // This loop satisfies the type checker - esp_restart() doesn't return
         #[allow(unreachable_code)]
@@ -544,7 +548,12 @@ fn main() -> anyhow::Result<()> {
             // In AP mode, update client count; in STA mode, check connection
             if AP_MODE_ACTIVE.load(Ordering::SeqCst) {
                 // Query AP client count from ESP-IDF using sta_list
+                // SAFETY: wifi_sta_list_t is a simple C struct with no pointers or
+                // invariants that zeroed memory would violate. All fields are integers.
                 let mut sta_list: esp_idf_sys::wifi_sta_list_t = unsafe { std::mem::zeroed() };
+                // SAFETY: esp_wifi_ap_get_sta_list() fills the provided sta_list struct
+                // with current AP client information. We pass a valid mutable reference
+                // and the struct has been properly initialized above.
                 unsafe {
                     esp_idf_sys::esp_wifi_ap_get_sta_list(&mut sta_list);
                 }

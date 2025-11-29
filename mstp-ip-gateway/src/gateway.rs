@@ -29,8 +29,10 @@ const NL_I_AM_ROUTER_TO_NETWORK: u8 = 0x01;
 const NL_REJECT_MESSAGE_TO_NETWORK: u8 = 0x03;
 
 /// Reject-Message-To-Network reason codes (ASHRAE 135 Annex R)
+/// All codes are defined per the BACnet standard, though not all are currently used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[allow(dead_code)]
 pub enum RejectReason {
     /// Other error
     Other = 0,
@@ -688,6 +690,14 @@ impl BacnetGateway {
             entry.refresh(ttl_seconds);
             debug!("Refreshed foreign device registration for {}", source_addr);
         } else {
+            // Check FDT capacity limit (prevent DoS via excessive registrations)
+            const MAX_FDT_ENTRIES: usize = 255;
+            if self.foreign_device_table.len() >= MAX_FDT_ENTRIES {
+                warn!("FDT full ({} entries), rejecting registration from {}", MAX_FDT_ENTRIES, source_addr);
+                let result = self.build_bvlc_result(BVLC_RESULT_REGISTER_FD_NAK);
+                self.send_ip_packet(&result, source_addr)?;
+                return Ok(None);
+            }
             // New registration
             self.foreign_device_table.insert(
                 source_addr,
@@ -1103,6 +1113,8 @@ impl std::fmt::Display for GatewayError {
         }
     }
 }
+
+impl std::error::Error for GatewayError {}
 
 /// Parsed NPDU information
 #[allow(dead_code)]

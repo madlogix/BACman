@@ -92,6 +92,8 @@ impl std::fmt::Display for MstpError {
     }
 }
 
+impl std::error::Error for MstpError {}
+
 /// MS/TP Driver for ESP32
 /// Uses M5Stack RS-485 HAT with automatic direction control (no GPIO needed)
 #[allow(dead_code)]

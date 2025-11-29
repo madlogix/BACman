@@ -295,8 +295,8 @@ where
         }
 
         // Incremental update - only changed fields
-        // Clone last_status to avoid borrow checker issues
-        let last = self.last_status.clone().unwrap();
+        // Use take() instead of clone() to avoid allocation (we'll replace it anyway)
+        let last = self.last_status.take().unwrap();
 
         // WiFi mode and status
         if last.wifi_connected != status.wifi_connected || last.ip_address != status.ip_address || last.ap_mode_active != status.ap_mode_active {
@@ -438,7 +438,8 @@ where
         }
 
         // Incremental update - only changed fields
-        let last = self.last_status.clone().unwrap();
+        // Use take() instead of clone() to avoid allocation (we'll replace it anyway)
+        let last = self.last_status.take().unwrap();
 
         // WiFi status
         if last.wifi_connected != status.wifi_connected || last.ip_address != status.ip_address {
@@ -565,7 +566,8 @@ where
         }
 
         // Incremental update - only changed fields
-        let last = self.last_status.clone().unwrap();
+        // Use take() instead of clone() to avoid allocation (we'll replace it anyway)
+        let last = self.last_status.take().unwrap();
 
         // AP mode status
         if last.ap_mode_active != status.ap_mode_active {
