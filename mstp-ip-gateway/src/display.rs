@@ -201,6 +201,31 @@ where
         Ok(())
     }
 
+    /// Show a generic status message with title and subtitle
+    pub fn show_status_message(&mut self, title: &str, subtitle: &str) -> Result<(), anyhow::Error> {
+        self.clear()?;
+
+        let title_style = MonoTextStyle::new(&FONT_6X13, Rgb565::YELLOW);
+        let subtitle_style = MonoTextStyle::new(&FONT_6X13, Rgb565::WHITE);
+
+        Text::new(title, Point::new(50, 50), title_style)
+            .draw(&mut self.display)
+            .map_err(|e| anyhow::anyhow!("Draw failed: {:?}", e))?;
+
+        // Truncate subtitle if too long
+        let display_subtitle = if subtitle.len() > 35 {
+            &subtitle[..35]
+        } else {
+            subtitle
+        };
+
+        Text::new(display_subtitle, Point::new(10, 80), subtitle_style)
+            .draw(&mut self.display)
+            .map_err(|e| anyhow::anyhow!("Draw failed: {:?}", e))?;
+
+        Ok(())
+    }
+
     /// Draw static elements (title, labels) - called once
     fn draw_static_layout(&mut self) -> Result<(), anyhow::Error> {
         let cyan = MonoTextStyle::new(&FONT_6X13, Rgb565::CYAN);

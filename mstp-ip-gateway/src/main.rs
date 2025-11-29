@@ -158,35 +158,64 @@ fn main() -> anyhow::Result<()> {
     info!("  IP Network Number: {}", config.ip_network);
     info!("  Device Instance: {}", config.device_instance);
 
-    // Initialize WiFi with retry logic
+    // Initialize WiFi - check if credentials are configured
     info!("Initializing WiFi...");
-    lcd.show_wifi_connecting(&config.wifi_ssid)?;
 
-    let wifi = init_wifi_with_retry(
-        peripherals.modem,
-        sys_loop.clone(),
-        nvs,
-        &config.wifi_ssid,
-        &config.wifi_password,
-        3, // max retries
-    ).unwrap_or_else(|e| {
-        error!("WiFi initialization failed after retries: {}", e);
-        error!("Restarting...");
-        thread::sleep(Duration::from_secs(3));
-        // SAFETY: esp_restart() is always safe to call on ESP32 - it performs a
-        // software reset. Used here to retry WiFi initialization after failure.
-        unsafe { esp_idf_svc::sys::esp_restart(); }
-        // This loop satisfies the type checker - esp_restart() doesn't return
-        #[allow(unreachable_code)]
-        loop { thread::sleep(Duration::from_secs(1)); }
-    });
+    // Check if WiFi credentials are empty - if so, start in AP mode automatically
+    let (wifi, ip_info_str, start_in_ap_mode) = if config.wifi_ssid.is_empty() {
+        info!("No WiFi credentials configured - starting in AP mode");
+        lcd.show_status_message("AP Mode", &format!("SSID: {}", config.ap_ssid))?;
 
-    WIFI_CONNECTED.store(true, Ordering::SeqCst);
-    let ip_info = wifi.wifi().sta_netif().get_ip_info()?;
-    info!("WiFi connected!");
-    info!("  IP Address: {}", ip_info.ip);
-    info!("  Subnet: {}", ip_info.subnet.mask);
-    info!("  Gateway: {}", ip_info.subnet.gateway);
+        // Initialize WiFi in AP mode
+        let mut wifi = BlockingWifi::wrap(
+            EspWifi::new(peripherals.modem, sys_loop.clone(), Some(nvs))?,
+            sys_loop.clone(),
+        )?;
+
+        let ap_ip = switch_to_ap_mode(&mut wifi, &config.ap_ssid, &config.ap_password)?;
+        AP_MODE_ACTIVE.store(true, Ordering::SeqCst);
+
+        (wifi, ap_ip, true)
+    } else {
+        lcd.show_wifi_connecting(&config.wifi_ssid)?;
+
+        let wifi = init_wifi_with_retry(
+            peripherals.modem,
+            sys_loop.clone(),
+            nvs,
+            &config.wifi_ssid,
+            &config.wifi_password,
+            3, // max retries
+        ).unwrap_or_else(|e| {
+            error!("WiFi initialization failed after retries: {}", e);
+            error!("Restarting...");
+            thread::sleep(Duration::from_secs(3));
+            // SAFETY: esp_restart() is always safe to call on ESP32 - it performs a
+            // software reset. Used here to retry WiFi initialization after failure.
+            unsafe { esp_idf_svc::sys::esp_restart(); }
+            // This loop satisfies the type checker - esp_restart() doesn't return
+            #[allow(unreachable_code)]
+            loop { thread::sleep(Duration::from_secs(1)); }
+        });
+
+        WIFI_CONNECTED.store(true, Ordering::SeqCst);
+        let ip_info = wifi.wifi().sta_netif().get_ip_info()?;
+        let ip_str = ip_info.ip.to_string();
+
+        info!("WiFi connected!");
+        info!("  IP Address: {}", ip_info.ip);
+        info!("  Subnet: {}", ip_info.subnet.mask);
+        info!("  Gateway: {}", ip_info.subnet.gateway);
+
+        (wifi, ip_str, false)
+    };
+
+    let ip_info = if start_in_ap_mode {
+        // In AP mode, use AP netif for IP info
+        wifi.wifi().ap_netif().get_ip_info()?
+    } else {
+        wifi.wifi().sta_netif().get_ip_info()?
+    };
 
     // Initialize RS-485 UART for MS/TP
     // M5StickC Plus2 RS-485 HAT pinout:
@@ -315,7 +344,7 @@ fn main() -> anyhow::Result<()> {
 
     // Status tracking for display
     let mut status = GatewayStatus {
-        wifi_connected: true,
+        wifi_connected: !start_in_ap_mode,  // Only connected in Station mode
         ip_address: ip_info.ip.to_string(),
         mstp_network: config.mstp_network,
         ip_network: config.ip_network,
@@ -331,9 +360,9 @@ fn main() -> anyhow::Result<()> {
         mstp_state: "Initialize".to_string(),
         has_token: false,
         // AP mode fields
-        ap_mode_active: false,
+        ap_mode_active: start_in_ap_mode,
         ap_ssid: config.ap_ssid.clone(),
-        ap_ip: AP_IP_ADDRESS.to_string(),
+        ap_ip: if start_in_ap_mode { ip_info_str.clone() } else { "192.168.4.1".to_string() },
         ap_clients: 0,
     };
     info!(">>> [MAIN] DEBUG: GatewayStatus created successfully");
@@ -360,7 +389,7 @@ fn main() -> anyhow::Result<()> {
     // Update initial web state (web_state was created earlier for thread sharing)
     {
         let mut state = web_state.lock().unwrap();
-        state.wifi_connected = true;
+        state.wifi_connected = !start_in_ap_mode;  // Only connected in Station mode
         state.ip_address = ip_info.ip.to_string();
     }
     info!(">>> [MAIN] web_state updated");
@@ -828,7 +857,7 @@ fn switch_to_ap_mode(
     info!("Waiting for AP interface to initialize...");
     thread::sleep(Duration::from_millis(500));
 
-    // Verify AP is running by checking netif
+    // Get AP netif reference
     let ap_netif = wifi.wifi().ap_netif();
 
     // Wait for netif to be up (with timeout)
