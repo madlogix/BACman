@@ -46,14 +46,14 @@ After Priority 1+2 Fixes (~20 hours):
 ## 🚀 FIX PROGRESS TRACKER
 
 **Last Updated:** 2025-11-29 (Issue #2 FIXED)
-**GitHub Commit:** TBD - WiFi credentials removed
+**GitHub Commit:** `0c7032b` - WiFi credentials removed
 
 ### Phase 1 Progress (Critical Fixes)
 
 | # | Issue | Status | Commit | Notes |
 |---|-------|--------|--------|-------|
 | 1 | Bit string encoding (0x82→0x85) | ✅ FIXED | `51ec1fb` | Changed 0x82 to 0x85 in local_device.rs:780,787 |
-| 2 | Remove hardcoded WiFi credentials | ✅ FIXED | TBD | Changed to String::new() in config.rs:61-62 |
+| 2 | Remove hardcoded WiFi credentials | ✅ FIXED | `0c7032b` | Changed to String::new() in config.rs:61-62 |
 | 3 | Fix try_into().unwrap() panic | ⏳ PENDING | - | main.rs:707,710 |
 | 4 | Forwarded-NPDU source IP | ⏳ PENDING | - | gateway.rs:398-422 |
 | 5 | Implement FDT TTL enforcement | ⏳ PENDING | - | gateway.rs:650-687 |
@@ -90,7 +90,7 @@ After Phase 2:     92% (A-)  [Projected]
 | 2025-11-29 | Initial code review completed | `2114598` |
 | 2025-11-29 | Review documents pushed to GitHub | `2114598` |
 | 2025-11-29 | ✅ Issue #1 FIXED: Bit string encoding (0x82→0x85) | `51ec1fb` |
-| 2025-11-29 | ✅ Issue #2 FIXED: Removed hardcoded WiFi credentials | TBD |
+| 2025-11-29 | ✅ Issue #2 FIXED: Removed hardcoded WiFi credentials | `0c7032b` |
 
 ---
 
