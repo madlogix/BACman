@@ -57,9 +57,10 @@ pub struct GatewayConfig {
 impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
-            // WiFi Station mode - Default values (should be overwritten from NVS or configured)
-            wifi_ssid: "XwLess".to_string(),
-            wifi_password: "madd0xwr0ss".to_string(),
+            // WiFi Station mode - MUST be configured via web interface or NVS
+            // Empty credentials will trigger AP mode for initial configuration
+            wifi_ssid: String::new(),
+            wifi_password: String::new(),
 
             // WiFi Access Point mode - creates "BACman-XXXX" network
             // Password must be 8+ characters for WPA2
