@@ -46,13 +46,13 @@ After Priority 1+2 Fixes (~20 hours):
 ## 🚀 FIX PROGRESS TRACKER
 
 **Last Updated:** 2025-11-29 (Issue #1 FIXED)
-**GitHub Commit:** `2f10a15` - Progress tracker added
+**GitHub Commit:** `51ec1fb` - Bit string encoding fix
 
 ### Phase 1 Progress (Critical Fixes)
 
 | # | Issue | Status | Commit | Notes |
 |---|-------|--------|--------|-------|
-| 1 | Bit string encoding (0x82→0x85) | ✅ FIXED | Pending | Changed 0x82 to 0x85 in local_device.rs:780,787 |
+| 1 | Bit string encoding (0x82→0x85) | ✅ FIXED | `51ec1fb` | Changed 0x82 to 0x85 in local_device.rs:780,787 |
 | 2 | Remove hardcoded WiFi credentials | ⏳ PENDING | - | config.rs:61-62 |
 | 3 | Fix try_into().unwrap() panic | ⏳ PENDING | - | main.rs:707,710 |
 | 4 | Forwarded-NPDU source IP | ⏳ PENDING | - | gateway.rs:398-422 |
@@ -89,7 +89,7 @@ After Phase 2:     92% (A-)  [Projected]
 |------|--------|--------|
 | 2025-11-29 | Initial code review completed | `2114598` |
 | 2025-11-29 | Review documents pushed to GitHub | `2114598` |
-| 2025-11-29 | ✅ Issue #1 FIXED: Bit string encoding (0x82→0x85) | Pending |
+| 2025-11-29 | ✅ Issue #1 FIXED: Bit string encoding (0x82→0x85) | `51ec1fb` |
 
 ---
 
