@@ -823,12 +823,38 @@ fn switch_to_ap_mode(
     wifi.set_configuration(&Configuration::AccessPoint(ap_config))?;
     wifi.start()?;
 
-    // Get the actual AP IP address from netif
+    // Wait for AP interface to be fully initialized
+    // The AP netif needs time to start the DHCP server and configure the interface
+    info!("Waiting for AP interface to initialize...");
+    thread::sleep(Duration::from_millis(500));
+
+    // Verify AP is running by checking netif
     let ap_netif = wifi.wifi().ap_netif();
+
+    // Wait for netif to be up (with timeout)
+    let mut netif_up = false;
+    for i in 0..10 {
+        match ap_netif.is_up() {
+            Ok(true) => {
+                netif_up = true;
+                break;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                warn!("Error checking AP netif status: {}", e);
+            }
+        }
+        if i == 9 {
+            warn!("AP netif not fully up after timeout, continuing anyway");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // Get the actual AP IP address from netif
     let ip_info = ap_netif.get_ip_info()?;
     let ip_str = format!("{}", ip_info.ip);
 
-    info!("WiFi AP started: SSID='{}', IP={}", ap_ssid, ip_str);
+    info!("WiFi AP started: SSID='{}', IP={}, netif_up={}", ap_ssid, ip_str, netif_up);
     Ok(ip_str)
 }
 
