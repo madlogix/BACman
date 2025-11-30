@@ -6,6 +6,7 @@
 
 use esp_idf_svc::nvs::{EspNvs, EspNvsPartition, NvsDefault};
 use log::{info, warn};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 /// NVS namespace for gateway configuration
 const NVS_NAMESPACE: &str = "bacman_cfg";
@@ -26,6 +27,12 @@ mod nvs_keys {
     // AP mode settings
     pub const AP_SSID: &str = "ap_ssid";
     pub const AP_PASS: &str = "ap_pass";
+    // BDT persistence (stores as comma-separated IP:port list)
+    pub const BDT_ENTRIES: &str = "bdt_entries";
+    pub const BDT_COUNT: &str = "bdt_count";
+    // Routing table persistence
+    pub const RT_ENTRIES: &str = "rt_entries";
+    pub const RT_COUNT: &str = "rt_count";
 }
 
 /// Gateway configuration settings
@@ -221,6 +228,191 @@ impl GatewayConfig {
         let nvs = EspNvs::new(nvs_partition, NVS_NAMESPACE, true)?;
         nvs.set_u8(nvs_keys::CONFIGURED, 0)?;
         info!("Configuration cleared - will use defaults on next boot");
+        Ok(())
+    }
+}
+
+/// BDT entry for NVS persistence (matches gateway::BdtEntry)
+#[derive(Debug, Clone)]
+pub struct BdtEntryConfig {
+    pub address: SocketAddr,
+    pub broadcast_mask: u32,
+}
+
+/// Routing table entry for NVS persistence (matches gateway::RoutingTableEntry)
+#[derive(Debug, Clone)]
+pub struct RoutingTableEntryConfig {
+    pub network: u16,
+    pub port_id: u8,
+    pub port_info: Vec<u8>,
+}
+
+/// BDT and Routing Table persistence functions
+pub struct NetworkTablePersistence;
+
+impl NetworkTablePersistence {
+    /// Save BDT entries to NVS
+    /// Format: count (u8), then for each entry: IP (4 bytes) + port (2 bytes BE) + mask (4 bytes BE)
+    pub fn save_bdt(
+        nvs_partition: EspNvsPartition<NvsDefault>,
+        entries: &[BdtEntryConfig],
+    ) -> Result<(), anyhow::Error> {
+        let mut nvs = EspNvs::new(nvs_partition, NVS_NAMESPACE, true)?;
+
+        let count = entries.len().min(255) as u8;
+        nvs.set_u8(nvs_keys::BDT_COUNT, count)?;
+
+        if count == 0 {
+            info!("BDT cleared from NVS");
+            return Ok(());
+        }
+
+        // Serialize entries: 10 bytes each (4 IP + 2 port + 4 mask)
+        let mut buf = Vec::with_capacity(count as usize * 10);
+        for entry in entries.iter().take(count as usize) {
+            if let IpAddr::V4(ipv4) = entry.address.ip() {
+                buf.extend_from_slice(&ipv4.octets());
+                buf.extend_from_slice(&entry.address.port().to_be_bytes());
+                buf.extend_from_slice(&entry.broadcast_mask.to_be_bytes());
+            }
+        }
+
+        nvs.set_blob(nvs_keys::BDT_ENTRIES, &buf)?;
+        info!("Saved {} BDT entries to NVS", count);
+        Ok(())
+    }
+
+    /// Load BDT entries from NVS
+    pub fn load_bdt(
+        nvs_partition: EspNvsPartition<NvsDefault>,
+    ) -> Result<Vec<BdtEntryConfig>, anyhow::Error> {
+        let nvs = match EspNvs::new(nvs_partition, NVS_NAMESPACE, true) {
+            Ok(nvs) => nvs,
+            Err(e) => {
+                warn!("Failed to open NVS for BDT load: {}", e);
+                return Ok(Vec::new());
+            }
+        };
+
+        let count = nvs.get_u8(nvs_keys::BDT_COUNT)?.unwrap_or(0);
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut buf = vec![0u8; count as usize * 10];
+        match nvs.get_blob(nvs_keys::BDT_ENTRIES, &mut buf) {
+            Ok(Some(data)) => {
+                let mut entries = Vec::with_capacity(count as usize);
+                for chunk in data.chunks_exact(10) {
+                    let ip = Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]);
+                    let port = u16::from_be_bytes([chunk[4], chunk[5]]);
+                    let mask = u32::from_be_bytes([chunk[6], chunk[7], chunk[8], chunk[9]]);
+                    entries.push(BdtEntryConfig {
+                        address: SocketAddr::new(IpAddr::V4(ip), port),
+                        broadcast_mask: mask,
+                    });
+                }
+                info!("Loaded {} BDT entries from NVS", entries.len());
+                Ok(entries)
+            }
+            Ok(None) => Ok(Vec::new()),
+            Err(e) => {
+                warn!("Failed to read BDT from NVS: {}", e);
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    /// Save routing table entries to NVS
+    /// Format: count (u8), then for each entry: network (2 bytes BE) + port_id (1 byte) + info_len (1 byte) + info
+    pub fn save_routing_table(
+        nvs_partition: EspNvsPartition<NvsDefault>,
+        entries: &[RoutingTableEntryConfig],
+    ) -> Result<(), anyhow::Error> {
+        let mut nvs = EspNvs::new(nvs_partition, NVS_NAMESPACE, true)?;
+
+        let count = entries.len().min(255) as u8;
+        nvs.set_u8(nvs_keys::RT_COUNT, count)?;
+
+        if count == 0 {
+            info!("Routing table cleared from NVS");
+            return Ok(());
+        }
+
+        // Calculate total size and serialize
+        let mut buf = Vec::new();
+        for entry in entries.iter().take(count as usize) {
+            buf.extend_from_slice(&entry.network.to_be_bytes());
+            buf.push(entry.port_id);
+            let info_len = entry.port_info.len().min(255) as u8;
+            buf.push(info_len);
+            buf.extend_from_slice(&entry.port_info[..info_len as usize]);
+        }
+
+        nvs.set_blob(nvs_keys::RT_ENTRIES, &buf)?;
+        info!("Saved {} routing table entries to NVS", count);
+        Ok(())
+    }
+
+    /// Load routing table entries from NVS
+    pub fn load_routing_table(
+        nvs_partition: EspNvsPartition<NvsDefault>,
+    ) -> Result<Vec<RoutingTableEntryConfig>, anyhow::Error> {
+        let nvs = match EspNvs::new(nvs_partition, NVS_NAMESPACE, true) {
+            Ok(nvs) => nvs,
+            Err(e) => {
+                warn!("Failed to open NVS for routing table load: {}", e);
+                return Ok(Vec::new());
+            }
+        };
+
+        let count = nvs.get_u8(nvs_keys::RT_COUNT)?.unwrap_or(0);
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Max size: count * (2 + 1 + 1 + 255) = count * 259
+        let mut buf = vec![0u8; count as usize * 259];
+        match nvs.get_blob(nvs_keys::RT_ENTRIES, &mut buf) {
+            Ok(Some(data)) => {
+                let mut entries = Vec::with_capacity(count as usize);
+                let mut offset = 0;
+                while offset + 4 <= data.len() && entries.len() < count as usize {
+                    let network = u16::from_be_bytes([data[offset], data[offset + 1]]);
+                    let port_id = data[offset + 2];
+                    let info_len = data[offset + 3] as usize;
+                    offset += 4;
+
+                    let port_info = if offset + info_len <= data.len() {
+                        data[offset..offset + info_len].to_vec()
+                    } else {
+                        Vec::new()
+                    };
+                    offset += info_len;
+
+                    entries.push(RoutingTableEntryConfig {
+                        network,
+                        port_id,
+                        port_info,
+                    });
+                }
+                info!("Loaded {} routing table entries from NVS", entries.len());
+                Ok(entries)
+            }
+            Ok(None) => Ok(Vec::new()),
+            Err(e) => {
+                warn!("Failed to read routing table from NVS: {}", e);
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    /// Clear BDT and routing table from NVS
+    pub fn clear_tables(nvs_partition: EspNvsPartition<NvsDefault>) -> Result<(), anyhow::Error> {
+        let nvs = EspNvs::new(nvs_partition, NVS_NAMESPACE, true)?;
+        nvs.set_u8(nvs_keys::BDT_COUNT, 0)?;
+        nvs.set_u8(nvs_keys::RT_COUNT, 0)?;
+        info!("BDT and routing table cleared from NVS");
         Ok(())
     }
 }

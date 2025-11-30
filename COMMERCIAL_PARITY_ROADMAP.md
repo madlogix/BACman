@@ -228,10 +228,10 @@
 - [x] **6.3.2** Implement Read-Broadcast-Distribution-Table service (BVLC 0x02)
 - [x] **6.3.3** Implement Write-Broadcast-Distribution-Table service (BVLC 0x01)
 - [x] **6.3.4** Forward broadcasts to all BDT entries (Forwarded-NPDU)
-- [ ] **6.3.5** Store BDT in persistent storage (future - NVS)
-- [ ] **6.3.6** Web UI for BDT configuration (future)
+- [x] **6.3.5** Store BDT in persistent storage (NVS)
+- [x] **6.3.6** Web UI for BDT configuration
 
-**Implementation:** `gateway.rs` - `BdtEntry`, `handle_read_bdt()`, `handle_write_bdt()`, `forward_to_bdt_entries()`
+**Implementation:** `gateway.rs` - `BdtEntry`, `handle_read_bdt()`, `handle_write_bdt()`, `forward_to_bdt_entries()`, `save_bdt_to_nvs()`, `set_nvs_partition()`; `config.rs` - `NetworkTablePersistence`; `web.rs` - `/bdt` page
 
 ### 6.4 Segment Retransmission ✓ COMPLETE
 > Reliable large file transfers
@@ -249,9 +249,9 @@
 
 - [x] **6.5.1** Parse Who-Is-Router-To-Network requests
 - [x] **6.5.2** Respond with I-Am-Router-To-Network for known networks
-- [ ] **6.5.3** Forward to other routers for unknown networks (future)
+- [x] **6.5.3** Forward to other routers for unknown networks
 
-**Implementation:** `gateway.rs` - `handle_network_message_from_mstp()`, `build_i_am_router_to_network()`
+**Implementation:** `gateway.rs` - `handle_network_message_from_mstp()`, `handle_network_message_from_ip()`, `build_i_am_router_to_network()` with Who-Is-Router forwarding for unknown networks
 
 ### 6.6 Initialize-Routing-Table ✓ COMPLETE
 > Allow external tools to configure routing
@@ -259,9 +259,9 @@
 - [x] **6.6.1** Parse Initialize-Routing-Table request (network message 0x06)
 - [x] **6.6.2** Update internal routing table
 - [x] **6.6.3** Send Initialize-Routing-Table-Ack response (0x07)
-- [ ] **6.6.4** Persist routing table changes (future - NVS)
+- [x] **6.6.4** Persist routing table changes (NVS)
 
-**Implementation:** `gateway.rs` - `RoutingTableEntry`, `handle_initialize_routing_table()`, `build_initialize_routing_table_ack()`
+**Implementation:** `gateway.rs` - `RoutingTableEntry`, `handle_initialize_routing_table()`, `build_initialize_routing_table_ack()`, `save_routing_table_to_nvs()`; `config.rs` - `NetworkTablePersistence`
 
 ### 6.7 Display UI ✓ COMPLETE
 > Use M5StickC Plus2 LCD for status

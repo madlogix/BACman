@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use bacnet_rs::app::{Apdu, SegmentationManager};
 use bacnet_rs::service::{AbortReason, ConfirmedServiceChoice};
+use crate::config::{BdtEntryConfig, NetworkTablePersistence, RoutingTableEntryConfig};
 use crate::transaction::{PendingTransaction, TransactionTable, TransactionStats};
+use esp_idf_svc::nvs::{EspNvsPartition, NvsDefault};
 
 /// BACnet/IP BVLC function codes (ASHRAE 135 Annex J)
 const BVLC_RESULT: u8 = 0x00;
@@ -236,6 +238,9 @@ pub struct BacnetGateway {
     // Statistics
     stats: GatewayStats,
 
+    // NVS partition for BDT and routing table persistence
+    nvs_partition: Option<EspNvsPartition<NvsDefault>>,
+
     // UDP socket for sending (shared with receive thread via Arc)
     ip_socket: Option<Arc<UdpSocket>>,
 
@@ -312,6 +317,7 @@ impl BacnetGateway {
             ip_send_queue: Vec::new(),
             mstp_send_queue: Vec::new(),
             stats: GatewayStats::default(),
+            nvs_partition: None,
             ip_socket: None,
             router_announced: false,
             transactions: TransactionTable::new(),
@@ -367,6 +373,133 @@ impl BacnetGateway {
     /// Set custom address aging timeout
     pub fn set_address_max_age(&mut self, max_age: Duration) {
         self.address_max_age = max_age;
+    }
+
+    /// Set NVS partition for BDT and routing table persistence
+    /// Loads existing BDT and routing table from NVS if available
+    pub fn set_nvs_partition(&mut self, partition: EspNvsPartition<NvsDefault>) {
+        // Load existing BDT from NVS
+        if let Ok(bdt_entries) = NetworkTablePersistence::load_bdt(partition.clone()) {
+            if !bdt_entries.is_empty() {
+                self.broadcast_distribution_table = bdt_entries
+                    .into_iter()
+                    .map(|e| BdtEntry {
+                        address: e.address,
+                        mask: Self::u32_to_ipv4(e.broadcast_mask),
+                    })
+                    .collect();
+                info!("Loaded {} BDT entries from NVS", self.broadcast_distribution_table.len());
+            }
+        }
+
+        // Load existing routing table from NVS
+        if let Ok(rt_entries) = NetworkTablePersistence::load_routing_table(partition.clone()) {
+            if !rt_entries.is_empty() {
+                self.routing_table.clear();
+                for entry in rt_entries {
+                    self.routing_table.insert(entry.network, RoutingTableEntry {
+                        network: entry.network,
+                        port_id: entry.port_id,
+                        port_info: entry.port_info,
+                    });
+                }
+                info!("Loaded {} routing table entries from NVS", self.routing_table.len());
+            }
+        }
+
+        self.nvs_partition = Some(partition);
+    }
+
+    /// Save current BDT to NVS
+    fn save_bdt_to_nvs(&self) {
+        if let Some(ref partition) = self.nvs_partition {
+            let entries: Vec<BdtEntryConfig> = self.broadcast_distribution_table
+                .iter()
+                .map(|e| BdtEntryConfig {
+                    address: e.address,
+                    broadcast_mask: Self::ipv4_to_u32(e.mask),
+                })
+                .collect();
+            if let Err(e) = NetworkTablePersistence::save_bdt(partition.clone(), &entries) {
+                warn!("Failed to save BDT to NVS: {}", e);
+            }
+        }
+    }
+
+    /// Save current routing table to NVS
+    fn save_routing_table_to_nvs(&self) {
+        if let Some(ref partition) = self.nvs_partition {
+            let entries: Vec<RoutingTableEntryConfig> = self.routing_table
+                .values()
+                .map(|e| RoutingTableEntryConfig {
+                    network: e.network,
+                    port_id: e.port_id,
+                    port_info: e.port_info.clone(),
+                })
+                .collect();
+            if let Err(e) = NetworkTablePersistence::save_routing_table(partition.clone(), &entries) {
+                warn!("Failed to save routing table to NVS: {}", e);
+            }
+        }
+    }
+
+    /// Convert Ipv4Addr to u32 (network byte order)
+    fn ipv4_to_u32(ip: Ipv4Addr) -> u32 {
+        let octets = ip.octets();
+        ((octets[0] as u32) << 24) | ((octets[1] as u32) << 16) | ((octets[2] as u32) << 8) | (octets[3] as u32)
+    }
+
+    /// Convert u32 (network byte order) to Ipv4Addr
+    fn u32_to_ipv4(val: u32) -> Ipv4Addr {
+        Ipv4Addr::new(
+            ((val >> 24) & 0xFF) as u8,
+            ((val >> 16) & 0xFF) as u8,
+            ((val >> 8) & 0xFF) as u8,
+            (val & 0xFF) as u8,
+        )
+    }
+
+    /// Get BDT entries for web UI
+    pub fn get_bdt_entries(&self) -> Vec<(SocketAddr, Ipv4Addr)> {
+        self.broadcast_distribution_table
+            .iter()
+            .map(|e| (e.address, e.mask))
+            .collect()
+    }
+
+    /// Add a BDT entry (for web UI) and persist to NVS
+    pub fn add_bdt_entry(&mut self, address: SocketAddr, mask: Ipv4Addr) {
+        // Check if entry already exists
+        if !self.broadcast_distribution_table.iter().any(|e| e.address == address) {
+            self.broadcast_distribution_table.push(BdtEntry { address, mask });
+            info!("Added BDT entry: {} mask {}", address, mask);
+            self.save_bdt_to_nvs();
+        }
+    }
+
+    /// Remove a BDT entry (for web UI) and persist to NVS
+    pub fn remove_bdt_entry(&mut self, address: SocketAddr) {
+        let before = self.broadcast_distribution_table.len();
+        self.broadcast_distribution_table.retain(|e| e.address != address);
+        if self.broadcast_distribution_table.len() < before {
+            info!("Removed BDT entry: {}", address);
+            self.save_bdt_to_nvs();
+        }
+    }
+
+    /// Clear all BDT entries and persist to NVS
+    pub fn clear_bdt(&mut self) {
+        self.broadcast_distribution_table.clear();
+        info!("Cleared all BDT entries");
+        self.save_bdt_to_nvs();
+    }
+
+    /// Get routing table entries for web UI
+    pub fn get_routing_table_entries(&self) -> Vec<(u16, u8, Vec<u8>)> {
+        self.routing_table
+            .values()
+            .map(|e| (e.network, e.port_id, e.port_info.clone()))
+            .collect()
     }
 
     /// Learn/update an MS/TP to IP address mapping
@@ -1200,16 +1333,40 @@ impl BacnetGateway {
 
         match msg_type {
             NL_WHO_IS_ROUTER_TO_NETWORK => {
-                // Respond with I-Am-Router-To-Network
-                debug!("Received Who-Is-Router-To-Network from MS/TP");
-                // Check if they're asking about our IP network
-                if npdu_len + 1 < data.len() {
-                    let requested_network = ((data[npdu_len + 1] as u16) << 8)
-                        | (data[npdu_len + 2] as u16);
-                    if requested_network == self.ip_network || requested_network == 0xFFFF {
-                        // We are the router to the IP network
-                        // Response will be sent back via MS/TP (handled by caller)
-                    }
+                debug!("Received Who-Is-Router-To-Network from MS/TP (source: {})", _source_addr);
+                // Check if they're asking about a specific network
+                let requested_network = if npdu_len + 2 < data.len() {
+                    Some(((data[npdu_len + 1] as u16) << 8) | (data[npdu_len + 2] as u16))
+                } else {
+                    None // Query for all networks
+                };
+
+                debug!("  Requested network: {:?}, our IP network: {}", requested_network, self.ip_network);
+
+                let is_our_network = requested_network.is_none()
+                    || requested_network == Some(self.ip_network)
+                    || requested_network == Some(self.mstp_network)
+                    || requested_network == Some(0xFFFF);
+
+                if is_our_network {
+                    // Respond with I-Am-Router-To-Network for both our networks
+                    // Response is broadcast on IP to reach the original requester
+                    let response = self.build_i_am_router_to_network(&[self.ip_network, self.mstp_network]);
+                    let bvlc = build_bvlc(&response, true);
+                    let broadcast = self.get_broadcast_address();
+                    self.send_ip_packet(&bvlc, broadcast)?;
+                    debug!("  Sent I-Am-Router-To-Network: networks {:?}", [self.ip_network, self.mstp_network]);
+                }
+
+                // Forward to IP network for other routers to respond (6.5.3)
+                // This allows routers on the IP side to respond if they know the network
+                if requested_network.is_none() || !is_our_network {
+                    debug!("  Forwarding Who-Is-Router-To-Network to IP for other routers");
+                    let routed_npdu = build_routed_npdu(data, self.mstp_network, &[_source_addr], npdu, false)?;
+                    let gateway_addr = SocketAddr::new(IpAddr::V4(self.local_ip), self.local_port);
+                    let bvlc = self.build_forwarded_npdu(&routed_npdu, gateway_addr);
+                    let dest = self.get_broadcast_address();
+                    self.send_ip_packet(&bvlc, dest)?;
                 }
             }
             _ => {
@@ -1819,6 +1976,9 @@ impl BacnetGateway {
 
         self.broadcast_distribution_table = new_bdt;
 
+        // Persist BDT to NVS
+        self.save_bdt_to_nvs();
+
         // Send success response
         let result = self.build_bvlc_result(BVLC_RESULT_SUCCESS);
         self.send_ip_packet(&result, source_addr)?;
@@ -1919,10 +2079,12 @@ impl BacnetGateway {
 
                 debug!("  Requested network: {:?}, our MS/TP network: {}", requested_network, self.mstp_network);
 
-                if requested_network.is_none()
+                let is_our_network = requested_network.is_none()
                     || requested_network == Some(self.mstp_network)
-                    || requested_network == Some(0xFFFF)
-                {
+                    || requested_network == Some(self.ip_network)
+                    || requested_network == Some(0xFFFF);
+
+                if is_our_network {
                     // Respond with I-Am-Router-To-Network
                     // Include both networks we route to
                     let response = self.build_i_am_router_to_network(&[self.mstp_network, self.ip_network]);
@@ -1936,6 +2098,15 @@ impl BacnetGateway {
                     // This ensures they receive our response even if broadcast fails
                     debug!("  Sending I-Am-Router-To-Network: networks {:?}", [self.mstp_network, self.ip_network]);
                     self.send_ip_packet(&bvlc, source_addr)?;
+                }
+
+                // Forward to MS/TP network for other routers to respond (6.5.3)
+                // This allows routers on the MS/TP side to respond if they know the network
+                if requested_network.is_none() || !is_our_network {
+                    debug!("  Forwarding Who-Is-Router-To-Network to MS/TP for other routers");
+                    // Build NPDU with source info to route responses back
+                    let forwarded = build_routed_npdu(data, self.ip_network, &ip_to_mac(&source_addr), npdu, true)?;
+                    return Ok(Some((forwarded, 255))); // Broadcast on MS/TP
                 }
             }
             NL_INITIALIZE_ROUTING_TABLE => {
@@ -2029,6 +2200,9 @@ impl BacnetGateway {
                 );
             }
         }
+
+        // Persist routing table to NVS
+        self.save_routing_table_to_nvs();
 
         // Send Initialize-Routing-Table-Ack
         let ack = self.build_initialize_routing_table_ack();

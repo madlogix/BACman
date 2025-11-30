@@ -10,6 +10,7 @@ use embedded_svc::io::Write;
 use esp_idf_svc::http::server::{Configuration as HttpConfig, EspHttpServer};
 use esp_idf_svc::nvs::{EspNvsPartition, NvsDefault};
 use log::{error, info};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
 use crate::config::GatewayConfig;
@@ -34,6 +35,14 @@ pub struct WebState {
     pub start_time: std::time::Instant,
     /// Last few received BACnet data frames for debugging (source_mac, hex_data)
     pub last_rx_frames: std::collections::VecDeque<(u8, String)>,
+    /// BDT entries for display and management (synced from gateway)
+    pub bdt_entries: Vec<(SocketAddr, Ipv4Addr)>,
+    /// Request to add BDT entry (IP:port, mask)
+    pub bdt_add_request: Option<(SocketAddr, Ipv4Addr)>,
+    /// Request to remove BDT entry by address
+    pub bdt_remove_request: Option<SocketAddr>,
+    /// Request to clear all BDT entries
+    pub bdt_clear_request: bool,
 }
 
 /// Gateway stats snapshot for web display
@@ -62,6 +71,10 @@ impl WebState {
             scan_in_progress: false,
             start_time: std::time::Instant::now(),
             last_rx_frames: std::collections::VecDeque::new(),
+            bdt_entries: Vec::new(),
+            bdt_add_request: None,
+            bdt_remove_request: None,
+            bdt_clear_request: false,
         }
     }
 
@@ -319,6 +332,74 @@ pub fn start_web_server(
             .map(|(mac, hex)| format!("{{\"mac\":{},\"data\":\"{}\"}}", mac, hex))
             .collect();
         let json = format!("{{\"frames\":[{}]}}", frames.join(","));
+        let mut resp = req.into_response(200, Some("OK"), &[
+            ("Content-Type", "application/json"),
+            ("Access-Control-Allow-Origin", "*"),
+        ])?;
+        resp.write_all(json.as_bytes())?;
+        Ok::<(), anyhow::Error>(())
+    })?;
+
+    // BDT page (GET)
+    let state_bdt = Arc::clone(&state);
+    server.fn_handler("/bdt", embedded_svc::http::Method::Get, move |req| {
+        let state = state_bdt.lock().unwrap();
+        let html = generate_bdt_page(&state);
+        let mut resp = req.into_ok_response()?;
+        resp.write_all(html.as_bytes())?;
+        Ok::<(), anyhow::Error>(())
+    })?;
+
+    // BDT add entry (POST)
+    let state_bdt_add = Arc::clone(&state);
+    server.fn_handler("/bdt/add", embedded_svc::http::Method::Post, move |mut req| {
+        let mut body = [0u8; 256];
+        let len = req.read(&mut body).unwrap_or(0);
+        let body_str = std::str::from_utf8(&body[..len]).unwrap_or("");
+
+        let mut state = state_bdt_add.lock().unwrap();
+        let message = parse_bdt_add_form(body_str, &mut state);
+
+        let html = generate_bdt_page_with_message(&state, message);
+        let mut resp = req.into_ok_response()?;
+        resp.write_all(html.as_bytes())?;
+        Ok::<(), anyhow::Error>(())
+    })?;
+
+    // BDT remove entry (POST)
+    let state_bdt_remove = Arc::clone(&state);
+    server.fn_handler("/bdt/remove", embedded_svc::http::Method::Post, move |mut req| {
+        let mut body = [0u8; 128];
+        let len = req.read(&mut body).unwrap_or(0);
+        let body_str = std::str::from_utf8(&body[..len]).unwrap_or("");
+
+        let mut state = state_bdt_remove.lock().unwrap();
+        let message = parse_bdt_remove_form(body_str, &mut state);
+
+        let html = generate_bdt_page_with_message(&state, message);
+        let mut resp = req.into_ok_response()?;
+        resp.write_all(html.as_bytes())?;
+        Ok::<(), anyhow::Error>(())
+    })?;
+
+    // BDT clear all (POST)
+    let state_bdt_clear = Arc::clone(&state);
+    server.fn_handler("/bdt/clear", embedded_svc::http::Method::Post, move |req| {
+        let mut state = state_bdt_clear.lock().unwrap();
+        state.bdt_clear_request = true;
+        info!("BDT clear requested via web portal");
+
+        let html = generate_bdt_page_with_message(&state, "BDT clear requested. Entries will be removed.");
+        let mut resp = req.into_ok_response()?;
+        resp.write_all(html.as_bytes())?;
+        Ok::<(), anyhow::Error>(())
+    })?;
+
+    // API endpoint to get BDT entries as JSON
+    let state_bdt_api = Arc::clone(&state);
+    server.fn_handler("/api/bdt", embedded_svc::http::Method::Get, move |req| {
+        let state = state_bdt_api.lock().unwrap();
+        let json = generate_bdt_json(&state);
         let mut resp = req.into_response(200, Some("OK"), &[
             ("Content-Type", "application/json"),
             ("Access-Control-Allow-Origin", "*"),
@@ -1333,3 +1414,205 @@ const HTML_REBOOT_PAGE: &str = r#"<!DOCTYPE html>
     </div>
 </body>
 </html>"#;
+
+/// Parse BDT add form data
+fn parse_bdt_add_form(body: &str, state: &mut WebState) -> &'static str {
+    let mut ip_str = String::new();
+    let mut port: u16 = 47808;
+    let mut mask_str = String::new();
+
+    for pair in body.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        let key = parts.next().unwrap_or("");
+        let value = parts.next().unwrap_or("");
+        let value = urlencoding::decode(value).unwrap_or_default();
+
+        match key {
+            "ip" => ip_str = value.to_string(),
+            "port" => {
+                if let Ok(p) = value.parse::<u16>() {
+                    port = p;
+                }
+            }
+            "mask" => mask_str = value.to_string(),
+            _ => {}
+        }
+    }
+
+    // Parse IP address
+    let ip: Ipv4Addr = match ip_str.parse() {
+        Ok(ip) => ip,
+        Err(_) => return "Invalid IP address format",
+    };
+
+    // Parse subnet mask (default to 255.255.255.255 for host-specific)
+    let mask: Ipv4Addr = if mask_str.is_empty() {
+        Ipv4Addr::new(255, 255, 255, 255)
+    } else {
+        match mask_str.parse() {
+            Ok(m) => m,
+            Err(_) => return "Invalid subnet mask format",
+        }
+    };
+
+    // Create socket address
+    let addr = SocketAddr::new(std::net::IpAddr::V4(ip), port);
+
+    // Set request for main loop to process
+    state.bdt_add_request = Some((addr, mask));
+    info!("BDT add requested via web portal: {} mask {}", addr, mask);
+
+    "BDT entry add requested. Entry will be added."
+}
+
+/// Parse BDT remove form data
+fn parse_bdt_remove_form(body: &str, state: &mut WebState) -> &'static str {
+    let mut addr_str = String::new();
+
+    for pair in body.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        let key = parts.next().unwrap_or("");
+        let value = parts.next().unwrap_or("");
+        let value = urlencoding::decode(value).unwrap_or_default();
+
+        if key == "addr" {
+            addr_str = value.to_string();
+        }
+    }
+
+    // Parse socket address (format: "IP:port")
+    let addr: SocketAddr = match addr_str.parse() {
+        Ok(a) => a,
+        Err(_) => return "Invalid address format (expected IP:port)",
+    };
+
+    state.bdt_remove_request = Some(addr);
+    info!("BDT remove requested via web portal: {}", addr);
+
+    "BDT entry remove requested. Entry will be removed."
+}
+
+/// Generate BDT JSON
+fn generate_bdt_json(state: &WebState) -> String {
+    let entries: Vec<String> = state.bdt_entries
+        .iter()
+        .map(|(addr, mask)| {
+            format!(
+                r#"{{"address":"{}","mask":"{}"}}"#,
+                addr, mask
+            )
+        })
+        .collect();
+
+    format!(r#"{{"entries":[{}]}}"#, entries.join(","))
+}
+
+/// Generate BDT page HTML
+fn generate_bdt_page(state: &WebState) -> String {
+    generate_bdt_page_with_message(state, "")
+}
+
+/// Generate BDT page HTML with optional message
+fn generate_bdt_page_with_message(state: &WebState, message: &str) -> String {
+    let msg_html = if message.is_empty() {
+        String::new()
+    } else {
+        format!(r#"<div class="message">{}</div>"#, message)
+    };
+
+    let entries_html: String = if state.bdt_entries.is_empty() {
+        r#"<p style="color: #555; text-align: center;">No BDT entries configured</p>"#.to_string()
+    } else {
+        state.bdt_entries
+            .iter()
+            .map(|(addr, mask)| {
+                format!(
+                    r#"<div class="bdt-entry">
+                        <span class="addr">{}</span>
+                        <span class="mask">mask: {}</span>
+                        <form method="POST" action="/bdt/remove" style="display:inline">
+                            <input type="hidden" name="addr" value="{}">
+                            <button type="submit" class="btn btn-small btn-danger">Remove</button>
+                        </form>
+                    </div>"#,
+                    addr, mask, addr
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    format!(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+    <title>BACman Gateway - BDT Configuration</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>{}</style>
+    <style>
+        .bdt-entry {{ display: flex; align-items: center; gap: 16px; padding: 12px; background: #111; border: 1px solid #222; margin-bottom: 8px; }}
+        .bdt-entry .addr {{ color: #fff; font-weight: 500; min-width: 180px; }}
+        .bdt-entry .mask {{ color: #666; flex: 1; }}
+        .btn-small {{ padding: 4px 12px; font-size: 0.7em; }}
+        .btn-danger {{ border-color: #633; }}
+        .btn-danger:hover {{ background: #633; border-color: #844; }}
+        .add-form {{ background: #111; border: 1px solid #222; padding: 16px; margin-top: 16px; }}
+        .add-form h3 {{ margin-bottom: 16px; font-size: 0.9em; }}
+        .form-row {{ display: flex; gap: 12px; align-items: end; flex-wrap: wrap; }}
+        .form-row .form-group {{ margin-bottom: 0; }}
+        .form-group.small {{ max-width: 100px; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>BACman Gateway</h1>
+        <nav>
+            <a href="/status">Status</a>
+            <a href="/config">Config</a>
+            <a href="/bdt" class="active">BDT</a>
+        </nav>
+
+        {}
+
+        <div class="card">
+            <h2>Broadcast Distribution Table</h2>
+            <p style="color: #555; font-size: 0.8em; margin-bottom: 16px;">
+                BDT entries define peer BBMDs for broadcast distribution across subnets.
+            </p>
+            {}
+        </div>
+
+        <div class="add-form">
+            <h3>Add BDT Entry</h3>
+            <form method="POST" action="/bdt/add">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>IP Address</label>
+                        <input type="text" name="ip" placeholder="192.168.1.100" required>
+                    </div>
+                    <div class="form-group small">
+                        <label>Port</label>
+                        <input type="number" name="port" value="47808" min="1" max="65535">
+                    </div>
+                    <div class="form-group">
+                        <label>Subnet Mask</label>
+                        <input type="text" name="mask" placeholder="255.255.255.255">
+                    </div>
+                    <button type="submit" class="btn">Add Entry</button>
+                </div>
+            </form>
+        </div>
+
+        <div style="margin-top: 16px; display: flex; gap: 8px;">
+            <form method="POST" action="/bdt/clear" onsubmit="return confirm('Clear all BDT entries?')">
+                <button type="submit" class="btn btn-danger">Clear All Entries</button>
+            </form>
+        </div>
+    </div>
+</body>
+</html>"#,
+        CSS_STYLES,
+        msg_html,
+        entries_html
+    )
+}
