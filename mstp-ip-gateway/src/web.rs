@@ -41,6 +41,10 @@ pub struct WebState {
 pub struct GatewayStats {
     pub mstp_to_ip_packets: u64,
     pub ip_to_mstp_packets: u64,
+    pub mstp_to_ip_bytes: u64,
+    pub ip_to_mstp_bytes: u64,
+    pub routing_errors: u64,
+    pub transaction_timeouts: u64,
 }
 
 impl WebState {

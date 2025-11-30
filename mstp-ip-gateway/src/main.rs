@@ -34,11 +34,16 @@ mod config;
 mod display;
 mod gateway;
 mod local_device;
+// Modbus modules - disabled until integration is complete
+// mod modbus_driver;
+// mod modbus_tcp;
 mod mstp_driver;
 mod transaction;
 mod web;
 
 use config::GatewayConfig;
+// Rs485Protocol will be used when Modbus integration is complete
+// use config::Rs485Protocol;
 use display::{Display, DisplayScreen, GatewayStatus};
 use gateway::BacnetGateway;
 use local_device::LocalDevice;
@@ -402,6 +407,10 @@ fn main() -> anyhow::Result<()> {
     // Start at max to trigger immediate announcement on first loop
     let mut router_announce_counter: u64 = ROUTER_ANNOUNCE_INTERVAL;
 
+    // Stats logging tracking (log every 60 seconds)
+    let mut stats_log_counter: u64 = 0;
+    const STATS_LOG_INTERVAL: u64 = 6000; // 60 seconds at 10ms/iteration
+
     info!("╔══════════════════════════════════════════════════════════════╗");
     info!("║                    Gateway Running!                          ║");
     info!("╚══════════════════════════════════════════════════════════════╝");
@@ -449,6 +458,11 @@ fn main() -> anyhow::Result<()> {
         if let Ok(mut gw) = gateway.try_lock() {
             gw.process_housekeeping();
 
+            // Check network health every 100 iterations (1 second at 10ms/iteration)
+            if loop_count % 100 == 0 {
+                gw.check_network_health();
+            }
+
             // Check transaction timeouts every 100 iterations (1 second at 10ms/iteration)
             if loop_count % 100 == 0 {
                 let timeout_count = gw.process_transaction_timeouts();
@@ -476,6 +490,15 @@ fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
+            }
+        }
+
+        // Log gateway statistics periodically (separate lock acquisition)
+        stats_log_counter += 1;
+        if stats_log_counter >= STATS_LOG_INTERVAL {
+            stats_log_counter = 0;
+            if let Ok(gw) = gateway.try_lock() {
+                info!("\n{}", gw.get_stats_summary());
             }
         }
 
@@ -616,6 +639,10 @@ fn main() -> anyhow::Result<()> {
             if let Ok(mut web) = web_state.try_lock() {
                 web.gateway_stats.mstp_to_ip_packets = gw_stats.mstp_to_ip_packets;
                 web.gateway_stats.ip_to_mstp_packets = gw_stats.ip_to_mstp_packets;
+                web.gateway_stats.mstp_to_ip_bytes = gw_stats.mstp_to_ip_bytes;
+                web.gateway_stats.ip_to_mstp_bytes = gw_stats.ip_to_mstp_bytes;
+                web.gateway_stats.routing_errors = gw_stats.routing_errors;
+                web.gateway_stats.transaction_timeouts = gw_stats.transaction_timeouts;
             }
         }
 
@@ -1511,3 +1538,25 @@ fn try_process_ip_local_device(
     try_process_local_device(npdu_data, local_device, ip_network)
         .map(|(npdu, is_broadcast, _source_info)| (npdu, is_broadcast))
 }
+
+// Modbus RTU receive task - disabled until Modbus integration is complete
+// Will be enabled when Rs485Protocol switching is implemented
+/*
+fn modbus_receive_task(modbus_driver: Arc<Mutex<modbus_driver::ModbusDriver<'static>>>) {
+    info!("Modbus RTU receive task started");
+
+    loop {
+        // Poll the driver for incoming frames
+        if let Ok(mut driver) = modbus_driver.try_lock() {
+            // Poll returns Some(response) if a response was sent
+            if let Some(_response) = driver.poll() {
+                trace!("Modbus response sent");
+            }
+        }
+
+        // Small sleep to prevent busy-waiting
+        // Modbus t3.5 is ~1.75ms at >19200 baud, so 1ms polling is reasonable
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+*/

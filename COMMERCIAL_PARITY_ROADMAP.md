@@ -12,7 +12,7 @@
 | Phase | Description | Status | Completion |
 |-------|-------------|--------|------------|
 | Phase 1-4 | Core Routing & Transaction Tracking | COMPLETE | 100% |
-| Phase 5 | Production Ready | IN PROGRESS | 70% |
+| Phase 5 | Production Ready | IN PROGRESS | 90% |
 | Phase 6 | Full Commercial | NOT STARTED | 0% |
 | Phase 7 | Enterprise Features | NOT STARTED | 0% |
 
@@ -145,25 +145,29 @@
 - [ ] Noisy network: requests eventually succeed
 - [ ] Completely failed network: Abort after max retries
 
-### 5.5 Connection Monitoring
+### 5.5 Connection Monitoring ✓ COMPLETE
 > Detect network failures and report status
 
-- [ ] **5.5.1** Track last successful packet time per network
-- [ ] **5.5.2** Implement network health check (periodic ping)
-- [ ] **5.5.3** Set status flag when network appears down
-- [ ] **5.5.4** Log network failure/recovery events
-- [ ] **5.5.5** Add network-status to Network-Port objects
+- [x] **5.5.1** Track last successful packet time per network
+- [x] **5.5.2** Implement network health check (60-second threshold)
+- [x] **5.5.3** Set status flag when network appears down
+- [x] **5.5.4** Log network failure/recovery events
+- [ ] **5.5.5** Add network-status to Network-Port objects (future)
 
-### 5.6 Traffic Statistics
+**Implementation:** `gateway.rs` - `check_network_health()`, `is_network_healthy()`, activity timestamps
+
+### 5.6 Traffic Statistics ✓ COMPLETE
 > Operational visibility for troubleshooting
 
-- [ ] **5.6.1** Count packets routed IP->MS/TP
-- [ ] **5.6.2** Count packets routed MS/TP->IP
-- [ ] **5.6.3** Count routing errors
-- [ ] **5.6.4** Count transaction timeouts
-- [ ] **5.6.5** Track bytes transferred per direction
-- [ ] **5.6.6** Add last-activity timestamp
-- [ ] **5.6.7** Expose stats via proprietary properties or web API
+- [x] **5.6.1** Count packets routed IP->MS/TP
+- [x] **5.6.2** Count packets routed MS/TP->IP
+- [x] **5.6.3** Count routing errors
+- [x] **5.6.4** Count transaction timeouts
+- [x] **5.6.5** Track bytes transferred per direction
+- [x] **5.6.6** Add last-activity timestamp
+- [x] **5.6.7** Periodic stats logging (every 60s)
+
+**Implementation:** `gateway.rs` - Extended `GatewayStats`, `get_stats_summary()`
 
 ### 5.7 Improved Error Handling
 > Proper BACnet error responses

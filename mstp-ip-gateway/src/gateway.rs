@@ -206,10 +206,24 @@ pub struct BacnetGateway {
 #[derive(Debug, Default)]
 #[allow(dead_code)]
 pub struct GatewayStats {
+    // Traffic counters
     pub mstp_to_ip_packets: u64,
     pub ip_to_mstp_packets: u64,
     pub routing_errors: u64,
+    pub transaction_timeouts: u64,
+
+    // Byte counters
+    pub mstp_to_ip_bytes: u64,
+    pub ip_to_mstp_bytes: u64,
+
+    // Activity timestamps
     pub last_activity: Option<Instant>,
+    pub last_mstp_activity: Option<Instant>,
+    pub last_ip_activity: Option<Instant>,
+
+    // Network health status
+    pub mstp_network_up: bool,
+    pub ip_network_up: bool,
 }
 
 #[allow(dead_code)]
@@ -383,6 +397,9 @@ impl BacnetGateway {
                     tx.dest_mac,
                     tx.created_at.elapsed().as_secs_f32()
                 );
+
+                // Track timeout in statistics
+                self.stats.transaction_timeouts += 1;
 
                 if let Err(e) = self.send_abort_to_client(&tx, AbortReason::Other) {
                     warn!(
@@ -815,7 +832,10 @@ impl BacnetGateway {
         }
 
         self.stats.mstp_to_ip_packets += 1;
-        self.stats.last_activity = Some(Instant::now());
+        self.stats.mstp_to_ip_bytes += bvlc.len() as u64;
+        let now = Instant::now();
+        self.stats.last_activity = Some(now);
+        self.stats.last_mstp_activity = Some(now);
 
         Ok(None)
     }
@@ -1171,7 +1191,10 @@ impl BacnetGateway {
                                         }
 
                                         self.stats.ip_to_mstp_packets += 1;
-                                        self.stats.last_activity = Some(Instant::now());
+                                        self.stats.ip_to_mstp_bytes += routed_npdu.len() as u64;
+                                        let now = Instant::now();
+                                        self.stats.last_activity = Some(now);
+                                        self.stats.last_ip_activity = Some(now);
 
                                         info!(
                                             "Forwarding reassembled APDU to MS/TP: invoke_id={} dest={} len={}",
@@ -1315,7 +1338,10 @@ impl BacnetGateway {
         )?;
 
         self.stats.ip_to_mstp_packets += 1;
-        self.stats.last_activity = Some(Instant::now());
+        self.stats.ip_to_mstp_bytes += routed_npdu.len() as u64;
+        let now = Instant::now();
+        self.stats.last_activity = Some(now);
+        self.stats.last_ip_activity = Some(now);
 
         // Update address translation table with aging
         if let Some(ref src) = npdu.source {
@@ -1747,6 +1773,91 @@ impl BacnetGateway {
     pub fn get_stats(&self) -> &GatewayStats {
         &self.stats
     }
+
+    /// Check network health based on recent activity
+    /// A network is considered "healthy" if activity occurred within the last 60 seconds
+    pub fn check_network_health(&mut self) {
+        const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
+
+        // Check MS/TP network health
+        let mstp_healthy = self.stats.last_mstp_activity
+            .map(|t| t.elapsed() < HEALTH_TIMEOUT)
+            .unwrap_or(false);
+
+        // Detect MS/TP network up/down transitions
+        if mstp_healthy != self.stats.mstp_network_up {
+            if mstp_healthy {
+                info!("MS/TP network is now UP (activity detected)");
+            } else {
+                warn!("MS/TP network is now DOWN (no activity for {} seconds)", HEALTH_TIMEOUT.as_secs());
+            }
+            self.stats.mstp_network_up = mstp_healthy;
+        }
+
+        // Check IP network health
+        let ip_healthy = self.stats.last_ip_activity
+            .map(|t| t.elapsed() < HEALTH_TIMEOUT)
+            .unwrap_or(false);
+
+        // Detect IP network up/down transitions
+        if ip_healthy != self.stats.ip_network_up {
+            if ip_healthy {
+                info!("IP network is now UP (activity detected)");
+            } else {
+                warn!("IP network is now DOWN (no activity for {} seconds)", HEALTH_TIMEOUT.as_secs());
+            }
+            self.stats.ip_network_up = ip_healthy;
+        }
+    }
+
+    /// Check if a specific network is healthy (has recent activity)
+    pub fn is_network_healthy(&self, network_type: NetworkType) -> bool {
+        match network_type {
+            NetworkType::Mstp => self.stats.mstp_network_up,
+            NetworkType::Ip => self.stats.ip_network_up,
+        }
+    }
+
+    /// Get a formatted statistics summary for logging
+    pub fn get_stats_summary(&self) -> String {
+        let mstp_status = if self.stats.mstp_network_up { "UP" } else { "DOWN" };
+        let ip_status = if self.stats.ip_network_up { "UP" } else { "DOWN" };
+
+        let mstp_activity = self.stats.last_mstp_activity
+            .map(|t| format!("{:.1}s ago", t.elapsed().as_secs_f32()))
+            .unwrap_or_else(|| "never".to_string());
+
+        let ip_activity = self.stats.last_ip_activity
+            .map(|t| format!("{:.1}s ago", t.elapsed().as_secs_f32()))
+            .unwrap_or_else(|| "never".to_string());
+
+        format!(
+            "Gateway Stats:\n  \
+            MS/TP->IP: {} pkts ({} bytes), last: {}, status: {}\n  \
+            IP->MS/TP: {} pkts ({} bytes), last: {}, status: {}\n  \
+            Errors: {} routing, {} timeouts\n  \
+            Active transactions: {}, Foreign devices: {}",
+            self.stats.mstp_to_ip_packets,
+            self.stats.mstp_to_ip_bytes,
+            mstp_activity,
+            mstp_status,
+            self.stats.ip_to_mstp_packets,
+            self.stats.ip_to_mstp_bytes,
+            ip_activity,
+            ip_status,
+            self.stats.routing_errors,
+            self.stats.transaction_timeouts,
+            self.transactions.len(),
+            self.foreign_device_table.len()
+        )
+    }
+}
+
+/// Network type for health checking
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkType {
+    Mstp,
+    Ip,
 }
 
 /// Gateway error types
