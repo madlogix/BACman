@@ -272,12 +272,32 @@ fn main() -> anyhow::Result<()> {
     )));
 
     // Create local BACnet device for gateway discoverability
-    let local_device = Arc::new(LocalDevice::new_with_mstp(
+    let mut local_device = LocalDevice::new_with_mstp(
         config.device_instance,
         config.mstp_max_master,
         1, // max_info_frames
-    ));
+    );
     info!("Local BACnet device created: instance {}", config.device_instance);
+
+    // Initialize Network Port objects for both interfaces
+    // Get MAC address from WiFi interface (or use a dummy for now)
+    let mac_address = if start_in_ap_mode {
+        wifi.wifi().ap_netif().get_mac().unwrap_or([0x02, 0x00, 0x00, 0x00, 0x00, 0x01])
+    } else {
+        wifi.wifi().sta_netif().get_mac().unwrap_or([0x02, 0x00, 0x00, 0x00, 0x00, 0x01])
+    };
+
+    local_device.initialize_network_ports(
+        config.mstp_network,
+        config.mstp_address,
+        config.mstp_baud_rate,
+        config.ip_network,
+        local_ip.octets(),
+        subnet_mask.octets(),
+        mac_address,
+    );
+
+    let local_device = Arc::new(local_device);
 
     // Wrap WiFi in Arc<Mutex> for sharing with main loop (for reconnection)
     let wifi = Arc::new(Mutex::new(wifi));

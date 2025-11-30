@@ -29,6 +29,7 @@ const SERVICE_READ_PROPERTY_MULTIPLE: u8 = 14;
 
 /// Object types
 const OBJECT_TYPE_DEVICE: u16 = 8;
+const OBJECT_TYPE_NETWORK_PORT: u16 = 56;
 
 /// Segmentation support values
 const SEGMENTATION_NOT_SUPPORTED: u32 = 3;
@@ -63,6 +64,18 @@ const PROP_MAX_MASTER: u32 = 64;
 const PROP_LOCAL_DATE: u32 = 56;
 const PROP_LOCAL_TIME: u32 = 57;
 const PROP_DEVICE_ADDRESS_BINDING: u32 = 30;
+const PROP_NETWORK_TYPE: u32 = 208;
+const PROP_NETWORK_NUMBER: u32 = 425;
+const PROP_MAC_ADDRESS: u32 = 423;
+const PROP_LINK_SPEED: u32 = 420;
+const PROP_LINK_SPEEDS: u32 = 421;
+const PROP_NETWORK_NUMBER_QUALITY: u32 = 472;
+const PROP_PROTOCOL_LEVEL: u32 = 482;
+const PROP_CHANGES_PENDING: u32 = 416;
+const PROP_OUT_OF_SERVICE: u32 = 81;
+const PROP_IP_ADDRESS: u32 = 400;
+const PROP_SUBNET_MASK: u32 = 411;
+const PROP_BIP_MODE: u32 = 408;
 
 /// Error classes
 const ERROR_CLASS_OBJECT: u32 = 1;
@@ -74,6 +87,253 @@ const ERROR_CODE_UNKNOWN_PROPERTY: u32 = 32;
 
 /// Device status values
 const STATUS_OPERATIONAL: u32 = 0;
+
+/// Network type enumeration
+const NETWORK_TYPE_BACNET_IP: u32 = 0;
+const NETWORK_TYPE_MSTP: u32 = 2;
+
+/// Network number quality enumeration
+const NETWORK_NUMBER_QUALITY_CONFIGURED: u32 = 0;
+const NETWORK_NUMBER_QUALITY_LEARNED: u32 = 1;
+const NETWORK_NUMBER_QUALITY_UNKNOWN: u32 = 2;
+
+/// BACnet/IP mode enumeration
+const BIP_MODE_NORMAL: u32 = 0;
+const BIP_MODE_FOREIGN: u32 = 1;
+const BIP_MODE_BBMD: u32 = 2;
+
+/// Network Port Object representing a communication interface
+#[derive(Debug, Clone)]
+pub struct NetworkPort {
+    /// Object instance number
+    pub instance: u32,
+    /// Object name
+    pub name: String,
+    /// Network type (BACnet/IP, MS/TP, etc.)
+    pub network_type: u32,
+    /// BACnet network number
+    pub network_number: u16,
+    /// Network number quality (configured, learned, unknown)
+    pub network_number_quality: u32,
+    /// MAC address (for MS/TP: single byte, for IP: 6 bytes)
+    pub mac_address: Vec<u8>,
+    /// Link speed in bits/second
+    pub link_speed: f32,
+    /// Supported link speeds
+    pub link_speeds: Vec<f32>,
+    /// Protocol level (always 0 for BACnet)
+    pub protocol_level: u32,
+    /// Changes pending flag
+    pub changes_pending: bool,
+    /// Out of service flag
+    pub out_of_service: bool,
+    /// IP address (for BACnet/IP ports only)
+    pub ip_address: Option<[u8; 4]>,
+    /// Subnet mask (for BACnet/IP ports only)
+    pub subnet_mask: Option<[u8; 4]>,
+    /// BACnet/IP mode (Normal, Foreign, BBMD)
+    pub bip_mode: Option<u32>,
+    /// Max master (for MS/TP ports only)
+    pub max_master: Option<u8>,
+    /// Max info frames (for MS/TP ports only)
+    pub max_info_frames: Option<u8>,
+}
+
+impl NetworkPort {
+    /// Create a new BACnet/IP Network Port
+    pub fn new_bacnet_ip(
+        instance: u32,
+        name: String,
+        network_number: u16,
+        mac_address: [u8; 6],
+        ip_address: [u8; 4],
+        subnet_mask: [u8; 4],
+    ) -> Self {
+        Self {
+            instance,
+            name,
+            network_type: NETWORK_TYPE_BACNET_IP,
+            network_number,
+            network_number_quality: NETWORK_NUMBER_QUALITY_CONFIGURED,
+            mac_address: mac_address.to_vec(),
+            link_speed: 100_000_000.0, // 100 Mbps default
+            link_speeds: vec![10_000_000.0, 100_000_000.0, 1_000_000_000.0],
+            protocol_level: 0,
+            changes_pending: false,
+            out_of_service: false,
+            ip_address: Some(ip_address),
+            subnet_mask: Some(subnet_mask),
+            bip_mode: Some(BIP_MODE_NORMAL),
+            max_master: None,
+            max_info_frames: None,
+        }
+    }
+
+    /// Create a new MS/TP Network Port
+    pub fn new_mstp(
+        instance: u32,
+        name: String,
+        network_number: u16,
+        mac_address: u8,
+        baud_rate: u32,
+        max_master: u8,
+        max_info_frames: u8,
+    ) -> Self {
+        Self {
+            instance,
+            name,
+            network_type: NETWORK_TYPE_MSTP,
+            network_number,
+            network_number_quality: NETWORK_NUMBER_QUALITY_CONFIGURED,
+            mac_address: vec![mac_address],
+            link_speed: baud_rate as f32,
+            link_speeds: vec![9600.0, 19200.0, 38400.0, 76800.0, 115200.0],
+            protocol_level: 0,
+            changes_pending: false,
+            out_of_service: false,
+            ip_address: None,
+            subnet_mask: None,
+            bip_mode: None,
+            max_master: Some(max_master),
+            max_info_frames: Some(max_info_frames),
+        }
+    }
+
+    /// Get property value for this Network Port
+    pub fn get_property(&self, property_id: u32) -> Option<Vec<u8>> {
+        match property_id {
+            PROP_OBJECT_IDENTIFIER => {
+                let object_id = ((OBJECT_TYPE_NETWORK_PORT as u32) << 22) | self.instance;
+                let mut v = vec![0xC4]; // Application tag 12, length 4
+                v.extend_from_slice(&object_id.to_be_bytes());
+                Some(v)
+            }
+            PROP_OBJECT_NAME => Some(encode_character_string(&self.name)),
+            PROP_OBJECT_TYPE => Some(vec![0x91, OBJECT_TYPE_NETWORK_PORT as u8]),
+            PROP_NETWORK_TYPE => Some(vec![0x91, self.network_type as u8]),
+            PROP_PROTOCOL_LEVEL => Some(vec![0x91, self.protocol_level as u8]),
+            PROP_NETWORK_NUMBER => Some(encode_unsigned(self.network_number as u32)),
+            PROP_NETWORK_NUMBER_QUALITY => Some(vec![0x91, self.network_number_quality as u8]),
+            PROP_MAC_ADDRESS => {
+                let len = self.mac_address.len();
+                let mut v = if len < 5 {
+                    vec![0x60 | (len as u8)] // Application tag 6 (OctetString)
+                } else {
+                    vec![0x65, len as u8]
+                };
+                v.extend_from_slice(&self.mac_address);
+                Some(v)
+            }
+            PROP_LINK_SPEED => Some(encode_real(self.link_speed)),
+            PROP_LINK_SPEEDS => {
+                // Array of Real values
+                let mut v = Vec::new();
+                for speed in &self.link_speeds {
+                    v.extend_from_slice(&encode_real(*speed));
+                }
+                Some(v)
+            }
+            PROP_CHANGES_PENDING => Some(vec![0x11, if self.changes_pending { 1 } else { 0 }]),
+            PROP_OUT_OF_SERVICE => Some(vec![0x11, if self.out_of_service { 1 } else { 0 }]),
+
+            // BACnet/IP specific properties
+            PROP_IP_ADDRESS => {
+                if let Some(ip) = self.ip_address {
+                    let mut v = vec![0x64]; // Application tag 6, length 4
+                    v.extend_from_slice(&ip);
+                    Some(v)
+                } else {
+                    None
+                }
+            }
+            PROP_SUBNET_MASK => {
+                if let Some(mask) = self.subnet_mask {
+                    let mut v = vec![0x64]; // Application tag 6, length 4
+                    v.extend_from_slice(&mask);
+                    Some(v)
+                } else {
+                    None
+                }
+            }
+            PROP_BIP_MODE => {
+                if let Some(mode) = self.bip_mode {
+                    Some(vec![0x91, mode as u8])
+                } else {
+                    None
+                }
+            }
+
+            // MS/TP specific properties
+            PROP_MAX_MASTER => {
+                if let Some(max) = self.max_master {
+                    Some(vec![0x21, max])
+                } else {
+                    None
+                }
+            }
+            PROP_MAX_INFO_FRAMES => {
+                if let Some(max) = self.max_info_frames {
+                    Some(vec![0x21, max])
+                } else {
+                    None
+                }
+            }
+
+            _ => None,
+        }
+    }
+}
+
+/// Helper function to encode a Real (32-bit float)
+fn encode_real(value: f32) -> Vec<u8> {
+    let mut v = vec![0x44]; // Application tag 4 (Real), length 4
+    v.extend_from_slice(&value.to_be_bytes());
+    v
+}
+
+/// Helper function to encode an unsigned integer
+fn encode_unsigned(value: u32) -> Vec<u8> {
+    if value <= 0xFF {
+        vec![0x21, value as u8]
+    } else if value <= 0xFFFF {
+        let mut v = vec![0x22];
+        v.extend_from_slice(&(value as u16).to_be_bytes());
+        v
+    } else if value <= 0xFFFFFF {
+        let bytes = value.to_be_bytes();
+        vec![0x23, bytes[1], bytes[2], bytes[3]]
+    } else {
+        let mut v = vec![0x24];
+        v.extend_from_slice(&value.to_be_bytes());
+        v
+    }
+}
+
+/// Helper function to encode a character string
+fn encode_character_string(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let len = bytes.len() + 1; // +1 for encoding byte
+
+    let mut result = Vec::with_capacity(len + 3);
+
+    // Application tag 7 (Character String)
+    if len < 5 {
+        result.push(0x70 | (len as u8));
+    } else if len < 254 {
+        result.push(0x75);
+        result.push(len as u8);
+    } else {
+        result.push(0x75);
+        result.push(254);
+        result.extend_from_slice(&(len as u16).to_be_bytes());
+    }
+
+    // Character encoding (0 = UTF-8/ANSI X3.4)
+    result.push(0);
+    result.extend_from_slice(bytes);
+
+    result
+}
 
 /// Local BACnet Device
 pub struct LocalDevice {
@@ -93,6 +353,8 @@ pub struct LocalDevice {
     pub max_master: u8,
     /// Max info frames for MS/TP
     pub max_info_frames: u8,
+    /// Network Port objects
+    pub network_ports: Vec<NetworkPort>,
 }
 
 impl LocalDevice {
@@ -113,7 +375,55 @@ impl LocalDevice {
             application_version: env!("CARGO_PKG_VERSION").to_string(),
             max_master,
             max_info_frames,
+            network_ports: Vec::new(),
         }
+    }
+
+    /// Add a Network Port object to this device
+    pub fn add_network_port(&mut self, port: NetworkPort) {
+        info!("Adding Network Port: {} (instance {})", port.name, port.instance);
+        self.network_ports.push(port);
+    }
+
+    /// Create and add Network Port objects for the gateway's interfaces
+    /// This should be called after device creation with network configuration
+    pub fn initialize_network_ports(
+        &mut self,
+        mstp_network: u16,
+        mstp_address: u8,
+        mstp_baud_rate: u32,
+        ip_network: u16,
+        ip_address: [u8; 4],
+        subnet_mask: [u8; 4],
+        mac_address: [u8; 6],
+    ) {
+        // Create MS/TP Network Port (instance 1)
+        let mstp_port = NetworkPort::new_mstp(
+            1,
+            "MS/TP Port".to_string(),
+            mstp_network,
+            mstp_address,
+            mstp_baud_rate,
+            self.max_master,
+            self.max_info_frames,
+        );
+        self.add_network_port(mstp_port);
+
+        // Create BACnet/IP Network Port (instance 2)
+        let ip_port = NetworkPort::new_bacnet_ip(
+            2,
+            "BACnet/IP Port".to_string(),
+            ip_network,
+            mac_address,
+            ip_address,
+            subnet_mask,
+        );
+        self.add_network_port(ip_port);
+
+        info!(
+            "Initialized Network Ports: MS/TP (net {}) and BACnet/IP (net {})",
+            mstp_network, ip_network
+        );
     }
 
     /// Process an APDU and return a response if applicable
@@ -404,16 +714,7 @@ impl LocalDevice {
 
         debug!("ReadProperty: object type={}, instance={}", object_type, object_instance);
 
-        // Check if it's our device object
-        if object_type != OBJECT_TYPE_DEVICE || object_instance != self.device_instance {
-            debug!(
-                "ReadProperty for unknown object: type={}, instance={} (ours is {})",
-                object_type, object_instance, self.device_instance
-            );
-            return self.build_error_response(invoke_id, SERVICE_READ_PROPERTY, ERROR_CLASS_OBJECT, ERROR_CODE_UNKNOWN_OBJECT);
-        }
-
-        // Parse property identifier (context tag 1)
+        // Parse property identifier (context tag 1) - needed for all objects
         // Context tag 1 with length 1: 0x19 = 0001_1001
         // Context tag 1 with length 2: 0x1A = 0001_1010
         if pos >= data.len() {
@@ -444,10 +745,74 @@ impl LocalDevice {
             _ => return None,
         };
 
+        // Now check object type and route to appropriate handler
+        if object_type == OBJECT_TYPE_NETWORK_PORT {
+            // Find the requested Network Port
+            if let Some(port) = self.network_ports.iter().find(|p| p.instance == object_instance) {
+                return self.build_read_property_response_for_network_port(invoke_id, object_id, property_id, port);
+            } else {
+                debug!("ReadProperty for unknown Network Port instance: {}", object_instance);
+                return self.build_error_response(invoke_id, SERVICE_READ_PROPERTY, ERROR_CLASS_OBJECT, ERROR_CODE_UNKNOWN_OBJECT);
+            }
+        }
+
+        // Check if it's our device object
+        if object_type != OBJECT_TYPE_DEVICE || object_instance != self.device_instance {
+            debug!(
+                "ReadProperty for unknown object: type={}, instance={} (ours is {})",
+                object_type, object_instance, self.device_instance
+            );
+            return self.build_error_response(invoke_id, SERVICE_READ_PROPERTY, ERROR_CLASS_OBJECT, ERROR_CODE_UNKNOWN_OBJECT);
+        }
+
         info!("ReadProperty for Device:{} property {} (0x{:02X})", self.device_instance, property_id, property_id);
 
         // Build response
         self.build_read_property_response(invoke_id, object_id, property_id)
+    }
+
+    /// Build ReadProperty response for Network Port objects
+    fn build_read_property_response_for_network_port(&self, invoke_id: u8, object_id: u32, property_id: u32, port: &NetworkPort) -> Option<(Vec<u8>, bool)> {
+        info!("ReadProperty for Network-Port:{} property {} (0x{:02X})", port.instance, property_id, property_id);
+
+        // Get the property value from the Network Port
+        let value_encoded = match port.get_property(property_id) {
+            Some(val) => val,
+            None => {
+                debug!("Unknown property {} (0x{:02X}) requested for Network Port", property_id, property_id);
+                return self.build_error_response(invoke_id, SERVICE_READ_PROPERTY, ERROR_CLASS_PROPERTY, ERROR_CODE_UNKNOWN_PROPERTY);
+            }
+        };
+
+        let mut apdu = Vec::with_capacity(64);
+
+        // PDU type - Complex ACK
+        apdu.push(APDU_COMPLEX_ACK);
+        apdu.push(invoke_id);
+        apdu.push(SERVICE_READ_PROPERTY);
+
+        // Object Identifier (context tag 0, length 4)
+        apdu.push(0x0C);
+        apdu.extend_from_slice(&object_id.to_be_bytes());
+
+        // Property Identifier (context tag 1)
+        if property_id <= 0xFF {
+            apdu.push(0x19);
+            apdu.push(property_id as u8);
+        } else {
+            apdu.push(0x1A);
+            apdu.extend_from_slice(&(property_id as u16).to_be_bytes());
+        }
+
+        // Property Value (context tag 3 opening)
+        apdu.push(0x3E);
+
+        apdu.extend_from_slice(&value_encoded);
+
+        // Property Value (context tag 3 closing)
+        apdu.push(0x3F);
+
+        Some((apdu, false)) // ReadProperty response is unicast
     }
 
     /// Build ReadProperty response
@@ -568,10 +933,20 @@ impl LocalDevice {
                 vec![0x21, 1]
             }
             PROP_OBJECT_LIST => {
-                // Array of Object Identifiers - just contains our device object
-                // Application tag 12 (Object ID), length 4
-                let mut v = vec![0xC4];
+                // Array of Object Identifiers - contains device object and all Network Port objects
+                let mut v = Vec::new();
+
+                // Add device object
+                v.push(0xC4); // Application tag 12, length 4
                 v.extend_from_slice(&object_id.to_be_bytes());
+
+                // Add all Network Port objects
+                for port in &self.network_ports {
+                    let port_obj_id = ((OBJECT_TYPE_NETWORK_PORT as u32) << 22) | port.instance;
+                    v.push(0xC4);
+                    v.extend_from_slice(&port_obj_id.to_be_bytes());
+                }
+
                 v
             }
             PROP_DESCRIPTION => {
@@ -659,9 +1034,20 @@ impl LocalDevice {
 
             debug!("RPM: Object type={}, instance={}", object_type, object_instance);
 
-            // Check if it's our device object
-            if object_type != OBJECT_TYPE_DEVICE || object_instance != self.device_instance {
-                debug!("RPM: Not our device, skipping");
+            // Check if it's a Network Port object
+            let is_network_port = object_type == OBJECT_TYPE_NETWORK_PORT;
+            let network_port = if is_network_port {
+                self.network_ports.iter().find(|p| p.instance == object_instance)
+            } else {
+                None
+            };
+
+            // Check if it's our device object or a valid Network Port
+            let is_valid_object = (object_type == OBJECT_TYPE_DEVICE && object_instance == self.device_instance)
+                || (is_network_port && network_port.is_some());
+
+            if !is_valid_object {
+                debug!("RPM: Unknown object, skipping");
                 // Skip this object's property list
                 while pos < data.len() && data[pos] != 0x0C {
                     pos += 1;
@@ -738,8 +1124,14 @@ impl LocalDevice {
                     apdu.extend_from_slice(&(property_id as u16).to_be_bytes());
                 }
 
-                // Get property value
-                if let Some(value) = self.get_property_value(object_id, property_id) {
+                // Get property value - from Network Port or Device
+                let value_opt = if let Some(port) = network_port {
+                    port.get_property(property_id)
+                } else {
+                    self.get_property_value(object_id, property_id)
+                };
+
+                if let Some(value) = value_opt {
                     // Opening tag 4 for property value
                     apdu.push(0x4E);
                     apdu.extend_from_slice(&value);
@@ -810,8 +1202,19 @@ impl LocalDevice {
             PROP_NUMBER_OF_APDU_RETRIES => Some(vec![0x21, 3]),
             PROP_DATABASE_REVISION => Some(vec![0x21, 1]),
             PROP_OBJECT_LIST => {
-                let mut v = vec![0xC4];
+                let mut v = Vec::new();
+
+                // Add device object
+                v.push(0xC4);
                 v.extend_from_slice(&object_id.to_be_bytes());
+
+                // Add all Network Port objects
+                for port in &self.network_ports {
+                    let port_obj_id = ((OBJECT_TYPE_NETWORK_PORT as u32) << 22) | port.instance;
+                    v.push(0xC4);
+                    v.extend_from_slice(&port_obj_id.to_be_bytes());
+                }
+
                 Some(v)
             }
             PROP_DESCRIPTION => Some(self.encode_character_string("BACnet MS/TP to IP Gateway")),
