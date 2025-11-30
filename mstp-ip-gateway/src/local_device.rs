@@ -14,6 +14,10 @@ const APDU_UNCONFIRMED_REQUEST: u8 = 0x10;
 const APDU_CONFIRMED_REQUEST: u8 = 0x00;
 const APDU_COMPLEX_ACK: u8 = 0x30;
 const APDU_ERROR: u8 = 0x50;
+const APDU_REJECT: u8 = 0x60;
+
+/// Reject reasons
+const REJECT_UNRECOGNIZED_SERVICE: u8 = 9;
 
 /// Unconfirmed service choices
 const SERVICE_WHO_IS: u8 = 8;
@@ -343,10 +347,22 @@ impl LocalDevice {
             SERVICE_READ_PROPERTY => self.handle_read_property(invoke_id, &apdu[4..]),
             SERVICE_READ_PROPERTY_MULTIPLE => self.handle_read_property_multiple(invoke_id, &apdu[4..]),
             _ => {
-                trace!("Ignoring confirmed service {}", service_choice);
-                None
+                debug!("Unsupported confirmed service {} - sending Reject", service_choice);
+                self.build_reject_response(invoke_id, REJECT_UNRECOGNIZED_SERVICE)
             }
         }
+    }
+
+    /// Build Reject response for unsupported services
+    fn build_reject_response(&self, invoke_id: u8, reject_reason: u8) -> Option<(Vec<u8>, bool)> {
+        let mut apdu = Vec::with_capacity(3);
+
+        // PDU type - Reject
+        apdu.push(APDU_REJECT);
+        apdu.push(invoke_id);
+        apdu.push(reject_reason);
+
+        Some((apdu, false))
     }
 
     /// Handle ReadProperty request

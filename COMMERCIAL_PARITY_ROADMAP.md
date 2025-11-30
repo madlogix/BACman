@@ -12,7 +12,7 @@
 | Phase | Description | Status | Completion |
 |-------|-------------|--------|------------|
 | Phase 1-4 | Core Routing & Transaction Tracking | COMPLETE | 100% |
-| Phase 5 | Production Ready | IN PROGRESS | 0% |
+| Phase 5 | Production Ready | IN PROGRESS | 40% |
 | Phase 6 | Full Commercial | NOT STARTED | 0% |
 | Phase 7 | Enterprise Features | NOT STARTED | 0% |
 
@@ -73,20 +73,22 @@
 **Estimated Effort:** 3-4 weeks
 **Priority:** CRITICAL for production deployment
 
-### 5.1 Router Device Object
+### 5.1 Router Device Object ✓ COMPLETE
 > Required for BACnet tools (Yabe, VTS, etc.) to discover and query the router
 
-- [ ] **5.1.1** Implement Device object (object-identifier, object-name, object-type)
-- [ ] **5.1.2** Add vendor-identifier property (get ASHRAE vendor ID or use 999)
-- [ ] **5.1.3** Add model-name property ("BACrust MS/TP Gateway")
-- [ ] **5.1.4** Add firmware-revision property
-- [ ] **5.1.5** Add application-software-version property
-- [ ] **5.1.6** Add protocol-version, protocol-revision properties
-- [ ] **5.1.7** Add protocol-services-supported property
-- [ ] **5.1.8** Add protocol-object-types-supported property
-- [ ] **5.1.9** Add max-apdu-length-accepted property
-- [ ] **5.1.10** Add segmentation-supported property
-- [ ] **5.1.11** Add object-list property (list of objects in device)
+- [x] **5.1.1** Implement Device object (object-identifier, object-name, object-type)
+- [x] **5.1.2** Add vendor-identifier property (get ASHRAE vendor ID or use 999)
+- [x] **5.1.3** Add model-name property ("BACrust MS/TP Gateway")
+- [x] **5.1.4** Add firmware-revision property
+- [x] **5.1.5** Add application-software-version property
+- [x] **5.1.6** Add protocol-version, protocol-revision properties
+- [x] **5.1.7** Add protocol-services-supported property
+- [x] **5.1.8** Add protocol-object-types-supported property
+- [x] **5.1.9** Add max-apdu-length-accepted property
+- [x] **5.1.10** Add segmentation-supported property
+- [x] **5.1.11** Add object-list property (list of objects in device)
+
+**Implementation:** `mstp-ip-gateway/src/local_device.rs`
 
 **Testing Checklist:**
 - [ ] Device appears in Yabe device list
@@ -94,14 +96,17 @@
 - [ ] ReadProperty device,X object-name works
 - [ ] ReadPropertyMultiple works for device properties
 
-### 5.2 ReadProperty Service Handler
+### 5.2 ReadProperty Service Handler ✓ COMPLETE
 > Handle ReadProperty requests to the router's local device
 
-- [ ] **5.2.1** Parse ReadProperty requests targeting local device
-- [ ] **5.2.2** Implement property value encoding for all Device properties
-- [ ] **5.2.3** Return proper Complex-ACK response
-- [ ] **5.2.4** Handle object-list property (return array of object IDs)
-- [ ] **5.2.5** Return Error for unknown properties
+- [x] **5.2.1** Parse ReadProperty requests targeting local device
+- [x] **5.2.2** Implement property value encoding for all Device properties
+- [x] **5.2.3** Return proper Complex-ACK response
+- [x] **5.2.4** Handle object-list property (return array of object IDs)
+- [x] **5.2.5** Return Error for unknown properties
+- [x] **5.2.6** ReadPropertyMultiple support
+
+**Implementation:** `mstp-ip-gateway/src/local_device.rs` - `handle_read_property()` and `handle_read_property_multiple()`
 
 **Testing Checklist:**
 - [ ] ReadProperty device,X object-name returns correct value
@@ -155,9 +160,11 @@
 > Proper BACnet error responses
 
 - [ ] **5.7.1** Send Reject-Message-To-Network for unknown DNET
-- [ ] **5.7.2** Send Error response for unsupported services
+- [x] **5.7.2** Send Reject response for unsupported services (Reject reason 9: unrecognized-service)
 - [ ] **5.7.3** Handle malformed packets gracefully
 - [ ] **5.7.4** Log all error conditions with context
+
+**Partial Implementation:** `mstp-ip-gateway/src/local_device.rs` - `build_reject_response()`
 
 ---
 
@@ -357,9 +364,10 @@
 
 ### Commit Hash References
 - Phase 1-4 Complete: `01f0a04` (2025-11-30)
+- Phase 5.1-5.2 Complete (LocalDevice): Already implemented, verified 2025-11-30
 
 ### Known Issues
-1. Abort sent for requests to gateway's local device (no Device object yet)
+1. ~~Abort sent for requests to gateway's local device~~ **FIXED** - Device object implemented, Reject sent for unsupported services
 2. No retry on timeout (aborts immediately)
 3. Configuration requires recompilation
 
