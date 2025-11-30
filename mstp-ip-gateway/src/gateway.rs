@@ -685,17 +685,41 @@ impl BacnetGateway {
     /// message should be sent back to the MS/TP source.
     pub fn route_from_mstp(&mut self, data: &[u8], source_addr: u8) -> Result<Option<(Vec<u8>, u8)>, GatewayError> {
         if data.len() < 2 {
+            warn!(
+                "Malformed packet from MS/TP {}: too short ({} bytes) - {}",
+                source_addr,
+                data.len(),
+                hex_dump(data, 64)
+            );
+            self.stats.routing_errors += 1;
             return Err(GatewayError::InvalidFrame);
         }
 
         // Parse NPDU
-        let (npdu, _npdu_len) = parse_npdu(data)?;
+        let (npdu, _npdu_len) = match parse_npdu(data) {
+            Ok(result) => result,
+            Err(e) => {
+                warn!(
+                    "Failed to parse NPDU from MS/TP {}: {} - {}",
+                    source_addr,
+                    e,
+                    hex_dump(data, 64)
+                );
+                self.stats.routing_errors += 1;
+                return Err(e);
+            }
+        };
 
         // Validate hop count before routing (ASHRAE 135 Clause 6.2.2)
         // If hop count reaches 0, message must be discarded
         if let Some(hop_count) = npdu.hop_count {
             if hop_count < MIN_HOP_COUNT {
-                warn!("Discarding message: hop count exhausted (was {})", hop_count);
+                warn!(
+                    "Discarding message from MS/TP {}: hop count exhausted (was {}) - {}",
+                    source_addr,
+                    hop_count,
+                    hex_dump(data, 32)
+                );
                 self.stats.routing_errors += 1;
                 return Err(GatewayError::HopCountExhausted);
             }
@@ -782,8 +806,14 @@ impl BacnetGateway {
             } else {
                 // Unknown network - send Reject-Message-To-Network back to source
                 warn!(
-                    "Network {} unreachable, sending reject to MS/TP source {}",
-                    dest.network, source_addr
+                    "Network {} unreachable from MS/TP source {}: router only knows networks {} and {} - DNET={} DADR={} - {}",
+                    dest.network,
+                    source_addr,
+                    self.mstp_network,
+                    self.ip_network,
+                    dest.network,
+                    if dest.address.is_empty() { "broadcast".to_string() } else { format!("{:?}", dest.address) },
+                    hex_dump(data, 32)
                 );
                 self.stats.routing_errors += 1;
                 let reject_npdu = self.build_reject_message_to_network(
@@ -1014,11 +1044,25 @@ impl BacnetGateway {
         source_addr: SocketAddr,
     ) -> Result<Option<(Vec<u8>, u8)>, GatewayError> {
         if data.len() < 4 {
+            warn!(
+                "Malformed BVLC packet from {}: too short ({} bytes) - {}",
+                source_addr,
+                data.len(),
+                hex_dump(data, 64)
+            );
+            self.stats.routing_errors += 1;
             return Err(GatewayError::InvalidFrame);
         }
 
         // Parse BVLC header
         if data[0] != 0x81 {
+            warn!(
+                "Invalid BVLC type from {}: expected 0x81, got 0x{:02X} - {}",
+                source_addr,
+                data[0],
+                hex_dump(data, 64)
+            );
+            self.stats.routing_errors += 1;
             return Err(GatewayError::InvalidFrame);
         }
 
@@ -1026,6 +1070,14 @@ impl BacnetGateway {
         let bvlc_length = ((data[2] as usize) << 8) | (data[3] as usize);
 
         if data.len() != bvlc_length {
+            warn!(
+                "BVLC length mismatch from {}: packet {} bytes, header says {} - {}",
+                source_addr,
+                data.len(),
+                bvlc_length,
+                hex_dump(data, 64)
+            );
+            self.stats.routing_errors += 1;
             return Err(GatewayError::InvalidFrame);
         }
 
@@ -1051,28 +1103,59 @@ impl BacnetGateway {
             BVLC_ORIGINAL_UNICAST | BVLC_ORIGINAL_BROADCAST => &data[4..],
             BVLC_FORWARDED_NPDU => {
                 if data.len() < 10 {
+                    warn!(
+                        "Malformed Forwarded-NPDU from {}: too short ({} bytes) - {}",
+                        source_addr,
+                        data.len(),
+                        hex_dump(data, 64)
+                    );
+                    self.stats.routing_errors += 1;
                     return Err(GatewayError::InvalidFrame);
                 }
                 &data[10..] // Skip original source address
             }
             _ => {
                 // Unknown BVLC functions
-                debug!("Ignoring unknown BVLC function: 0x{:02X}", bvlc_function);
+                debug!("Ignoring unknown BVLC function 0x{:02X} from {}", bvlc_function, source_addr);
                 return Ok(None);
             }
         };
 
         if npdu_data.len() < 2 {
+            warn!(
+                "NPDU too short from {}: {} bytes after BVLC - {}",
+                source_addr,
+                npdu_data.len(),
+                hex_dump(data, 64)
+            );
+            self.stats.routing_errors += 1;
             return Err(GatewayError::InvalidFrame);
         }
 
         // Parse NPDU
-        let (npdu, _npdu_len) = parse_npdu(npdu_data)?;
+        let (npdu, _npdu_len) = match parse_npdu(npdu_data) {
+            Ok(result) => result,
+            Err(e) => {
+                warn!(
+                    "Failed to parse NPDU from {}: {} - {}",
+                    source_addr,
+                    e,
+                    hex_dump(npdu_data, 64)
+                );
+                self.stats.routing_errors += 1;
+                return Err(e);
+            }
+        };
 
         // Validate hop count before routing (ASHRAE 135 Clause 6.2.2)
         if let Some(hop_count) = npdu.hop_count {
             if hop_count < MIN_HOP_COUNT {
-                warn!("Discarding message from IP: hop count exhausted (was {})", hop_count);
+                warn!(
+                    "Discarding message from {}: hop count exhausted (was {}) - {}",
+                    source_addr,
+                    hop_count,
+                    hex_dump(npdu_data, 32)
+                );
                 self.stats.routing_errors += 1;
                 return Err(GatewayError::HopCountExhausted);
             }
@@ -1310,8 +1393,14 @@ impl BacnetGateway {
             } else {
                 // Unknown network - send Reject-Message-To-Network back to IP source
                 warn!(
-                    "Network {} unreachable, sending reject to IP source {}",
-                    dest.network, source_addr
+                    "Network {} unreachable from IP source {}: router only knows networks {} and {} - DNET={} DADR={} - {}",
+                    dest.network,
+                    source_addr,
+                    self.mstp_network,
+                    self.ip_network,
+                    dest.network,
+                    if dest.address.is_empty() { "broadcast".to_string() } else { format!("{:?}", dest.address) },
+                    hex_dump(npdu_data, 32)
                 );
                 self.stats.routing_errors += 1;
                 let reject_npdu = self.build_reject_message_to_network(
@@ -1360,6 +1449,13 @@ impl BacnetGateway {
         source_addr: SocketAddr,
     ) -> Result<Option<(Vec<u8>, u8)>, GatewayError> {
         if data.len() < 6 {
+            warn!(
+                "Malformed Register-Foreign-Device from {}: too short ({} bytes) - {}",
+                source_addr,
+                data.len(),
+                hex_dump(data, 32)
+            );
+            self.stats.routing_errors += 1;
             return Err(GatewayError::InvalidFrame);
         }
 
@@ -1418,6 +1514,13 @@ impl BacnetGateway {
         source_addr: SocketAddr,
     ) -> Result<Option<(Vec<u8>, u8)>, GatewayError> {
         if data.len() < 10 {
+            warn!(
+                "Malformed Delete-FDT-Entry from {}: too short ({} bytes) - {}",
+                source_addr,
+                data.len(),
+                hex_dump(data, 32)
+            );
+            self.stats.routing_errors += 1;
             return Err(GatewayError::InvalidFrame);
         }
 
@@ -1457,6 +1560,13 @@ impl BacnetGateway {
         }
 
         if data.len() < 5 {
+            warn!(
+                "Malformed Distribute-Broadcast from {}: too short ({} bytes) - {}",
+                source_addr,
+                data.len(),
+                hex_dump(data, 32)
+            );
+            self.stats.routing_errors += 1;
             return Err(GatewayError::InvalidFrame);
         }
 
@@ -2107,15 +2217,44 @@ struct NetworkAddress {
     address: Vec<u8>,
 }
 
+/// Create a hex dump string for error logging
+///
+/// Returns a formatted hex string showing up to `max_bytes` of data.
+/// Format: "len=N [01 02 03 04...]" or "len=N [01 02 03...and M more]"
+fn hex_dump(data: &[u8], max_bytes: usize) -> String {
+    let show_bytes = data.len().min(max_bytes);
+    let hex_str: Vec<String> = data[..show_bytes]
+        .iter()
+        .map(|b| format!("{:02X}", b))
+        .collect();
+
+    if data.len() > max_bytes {
+        format!(
+            "len={} [{} ...and {} more]",
+            data.len(),
+            hex_str.join(" "),
+            data.len() - max_bytes
+        )
+    } else {
+        format!("len={} [{}]", data.len(), hex_str.join(" "))
+    }
+}
+
 /// Parse NPDU header
 fn parse_npdu(data: &[u8]) -> Result<(NpduInfo, usize), GatewayError> {
     if data.len() < 2 {
-        return Err(GatewayError::InvalidFrame);
+        return Err(GatewayError::NpduError(format!(
+            "NPDU too short: {} bytes (minimum 2)",
+            data.len()
+        )));
     }
 
     let version = data[0];
     if version != 1 {
-        return Err(GatewayError::NpduError(format!("Invalid version: {}", version)));
+        return Err(GatewayError::NpduError(format!(
+            "Invalid NPDU version: expected 1, got {}",
+            version
+        )));
     }
 
     let control = data[1];
@@ -2130,14 +2269,22 @@ fn parse_npdu(data: &[u8]) -> Result<(NpduInfo, usize), GatewayError> {
     // Parse destination
     let destination = if destination_present {
         if pos + 3 > data.len() {
-            return Err(GatewayError::InvalidFrame);
+            return Err(GatewayError::NpduError(format!(
+                "NPDU destination truncated: need {} bytes, have {}",
+                pos + 3,
+                data.len()
+            )));
         }
         let network = ((data[pos] as u16) << 8) | (data[pos + 1] as u16);
         let addr_len = data[pos + 2] as usize;
         pos += 3;
 
         if pos + addr_len > data.len() {
-            return Err(GatewayError::InvalidFrame);
+            return Err(GatewayError::NpduError(format!(
+                "NPDU destination address truncated: need {} bytes, have {}",
+                pos + addr_len,
+                data.len()
+            )));
         }
         let address = data[pos..pos + addr_len].to_vec();
         pos += addr_len;
@@ -2150,14 +2297,22 @@ fn parse_npdu(data: &[u8]) -> Result<(NpduInfo, usize), GatewayError> {
     // Parse source
     let source = if source_present {
         if pos + 3 > data.len() {
-            return Err(GatewayError::InvalidFrame);
+            return Err(GatewayError::NpduError(format!(
+                "NPDU source truncated: need {} bytes, have {}",
+                pos + 3,
+                data.len()
+            )));
         }
         let network = ((data[pos] as u16) << 8) | (data[pos + 1] as u16);
         let addr_len = data[pos + 2] as usize;
         pos += 3;
 
         if pos + addr_len > data.len() {
-            return Err(GatewayError::InvalidFrame);
+            return Err(GatewayError::NpduError(format!(
+                "NPDU source address truncated: need {} bytes, have {}",
+                pos + addr_len,
+                data.len()
+            )));
         }
         let address = data[pos..pos + addr_len].to_vec();
         pos += addr_len;
@@ -2170,7 +2325,11 @@ fn parse_npdu(data: &[u8]) -> Result<(NpduInfo, usize), GatewayError> {
     // Parse hop count
     let hop_count = if destination_present {
         if pos >= data.len() {
-            return Err(GatewayError::InvalidFrame);
+            return Err(GatewayError::NpduError(format!(
+                "NPDU hop count missing: need {} bytes, have {}",
+                pos + 1,
+                data.len()
+            )));
         }
         let hc = data[pos];
         pos += 1;
@@ -2293,5 +2452,116 @@ fn ip_to_mac(addr: &SocketAddr) -> Vec<u8> {
             ]
         }
         SocketAddr::V6(_) => vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hex_dump_short() {
+        let data = vec![0x01, 0x02, 0x03, 0x04];
+        let result = hex_dump(&data, 64);
+        assert_eq!(result, "len=4 [01 02 03 04]");
+    }
+
+    #[test]
+    fn test_hex_dump_long() {
+        let data = vec![0xAA; 100]; // 100 bytes of 0xAA
+        let result = hex_dump(&data, 8);
+        assert!(result.contains("len=100"));
+        assert!(result.contains("...and 92 more"));
+        assert!(result.contains("AA AA AA AA AA AA AA AA"));
+    }
+
+    #[test]
+    fn test_hex_dump_empty() {
+        let data = vec![];
+        let result = hex_dump(&data, 64);
+        assert_eq!(result, "len=0 []");
+    }
+
+    #[test]
+    fn test_parse_npdu_too_short() {
+        let data = vec![0x01]; // Only 1 byte
+        let result = parse_npdu(&data);
+        assert!(result.is_err());
+        if let Err(GatewayError::NpduError(msg)) = result {
+            assert!(msg.contains("too short"));
+            assert!(msg.contains("minimum 2"));
+        }
+    }
+
+    #[test]
+    fn test_parse_npdu_invalid_version() {
+        let data = vec![0x02, 0x00]; // Version 2 (invalid)
+        let result = parse_npdu(&data);
+        assert!(result.is_err());
+        if let Err(GatewayError::NpduError(msg)) = result {
+            assert!(msg.contains("Invalid NPDU version"));
+            assert!(msg.contains("expected 1, got 2"));
+        }
+    }
+
+    #[test]
+    fn test_parse_npdu_truncated_destination() {
+        // NPDU with destination flag set but incomplete data
+        let data = vec![
+            0x01, // Version
+            0x20, // Control: destination present
+            0x00, 0x01, // DNET = 1
+            0x05, // DADR length = 5 (but no address follows)
+        ];
+        let result = parse_npdu(&data);
+        assert!(result.is_err());
+        if let Err(GatewayError::NpduError(msg)) = result {
+            assert!(msg.contains("destination address truncated"));
+        }
+    }
+
+    #[test]
+    fn test_parse_npdu_valid_simple() {
+        // Simple NPDU with no destination or source
+        let data = vec![
+            0x01, // Version
+            0x00, // Control: no flags
+        ];
+        let result = parse_npdu(&data);
+        assert!(result.is_ok());
+        let (npdu, len) = result.unwrap();
+        assert_eq!(len, 2);
+        assert!(!npdu.network_message);
+        assert!(!npdu.destination_present);
+        assert!(!npdu.source_present);
+    }
+
+    #[test]
+    fn test_reject_reason_codes() {
+        // Verify reject reason enum values match BACnet spec
+        assert_eq!(RejectReason::Other as u8, 0);
+        assert_eq!(RejectReason::NotRouterToDnet as u8, 1);
+        assert_eq!(RejectReason::RouterBusy as u8, 2);
+        assert_eq!(RejectReason::UnknownNetworkMessage as u8, 3);
+        assert_eq!(RejectReason::MessageTooLong as u8, 4);
+        assert_eq!(RejectReason::SecurityError as u8, 5);
+        assert_eq!(RejectReason::AddressingError as u8, 6);
+    }
+
+    #[test]
+    fn test_build_reject_message_to_network() {
+        let gateway = BacnetGateway::new_default(1, 2, Ipv4Addr::new(192, 168, 1, 100));
+        let reject = gateway.build_reject_message_to_network(
+            RejectReason::NotRouterToDnet,
+            999, // Unknown network
+        );
+
+        // Verify NPDU structure
+        assert_eq!(reject[0], 0x01); // Version
+        assert_eq!(reject[1], 0x80); // Control: network layer message
+        assert_eq!(reject[2], NL_REJECT_MESSAGE_TO_NETWORK); // Message type
+        assert_eq!(reject[3], RejectReason::NotRouterToDnet as u8); // Reject reason
+        assert_eq!(reject[4], (999 >> 8) as u8); // DNET high byte
+        assert_eq!(reject[5], (999 & 0xFF) as u8); // DNET low byte
     }
 }
