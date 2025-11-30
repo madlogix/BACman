@@ -178,6 +178,10 @@ pub struct BacnetGateway {
     // Pending transmissions for IP side
     ip_send_queue: Vec<(Vec<u8>, SocketAddr)>,
 
+    // Pending transmissions for MS/TP side (used for retries)
+    // Each entry: (npdu_data, dest_mac)
+    mstp_send_queue: Vec<(Vec<u8>, u8)>,
+
     // Statistics
     stats: GatewayStats,
 
@@ -235,6 +239,7 @@ impl BacnetGateway {
             foreign_device_table: HashMap::new(),
             address_max_age: DEFAULT_ADDRESS_AGE,
             ip_send_queue: Vec::new(),
+            mstp_send_queue: Vec::new(),
             stats: GatewayStats::default(),
             ip_socket: None,
             router_announced: false,
@@ -331,34 +336,60 @@ impl BacnetGateway {
         self.ip_socket = Some(socket);
     }
 
-    /// Process transaction timeouts and send Abort PDUs to clients
+    /// Process transaction timeouts and retry or send Abort PDUs to clients
     ///
     /// This should be called periodically (e.g., every 1 second) from the main loop.
     /// Returns the number of transactions that timed out.
+    ///
+    /// Implements retry mechanism per Phase 5.4:
+    /// - If retries remaining: retransmit NPDU to MS/TP and re-add transaction with backoff
+    /// - If retries exhausted: send Abort to IP client
     pub fn process_transaction_timeouts(&mut self) -> usize {
         let timed_out = self.transactions.check_timeouts();
         let count = timed_out.len();
 
         for tx in timed_out {
             if tx.retries < tx.max_retries {
-                // Could implement retry here - for now, we just abort after first timeout
-                // In a full implementation, we would re-queue the request
+                // Retries remaining - retransmit to MS/TP
                 info!(
-                    "Transaction timeout (no retry): invoke_id={} service={:?} dest={}:{} age={:.1}s",
+                    "Transaction timeout, retrying: invoke_id={} service={:?} dest={}:{} retry={}/{} age={:.1}s",
+                    tx.invoke_id,
+                    tx.service,
+                    tx.dest_network,
+                    tx.dest_mac,
+                    tx.retries + 1,
+                    tx.max_retries,
+                    tx.created_at.elapsed().as_secs_f32()
+                );
+
+                // Queue NPDU for retransmission to MS/TP
+                // The original_npdu already has proper routing info (SNET/SADR)
+                self.queue_mstp_retransmit(tx.original_npdu.clone(), tx.dest_mac);
+
+                // Re-add transaction with incremented retry count and exponential backoff
+                if let Err(e) = self.transactions.retry(tx) {
+                    warn!(
+                        "Failed to re-add transaction for retry: {}",
+                        e
+                    );
+                }
+            } else {
+                // Retries exhausted - send Abort PDU to IP client
+                warn!(
+                    "Transaction retries exhausted: invoke_id={} service={:?} dest={}:{} total_age={:.1}s",
                     tx.invoke_id,
                     tx.service,
                     tx.dest_network,
                     tx.dest_mac,
                     tx.created_at.elapsed().as_secs_f32()
                 );
-            }
 
-            // Send Abort PDU to the original IP client
-            if let Err(e) = self.send_abort_to_client(&tx, AbortReason::Other) {
-                warn!(
-                    "Failed to send timeout abort to {}: {}",
-                    tx.source_addr, e
-                );
+                if let Err(e) = self.send_abort_to_client(&tx, AbortReason::Other) {
+                    warn!(
+                        "Failed to send timeout abort to {}: {}",
+                        tx.source_addr, e
+                    );
+                }
             }
         }
 
@@ -367,6 +398,27 @@ impl BacnetGateway {
         }
 
         count
+    }
+
+    /// Queue an NPDU for retransmission to MS/TP
+    ///
+    /// This is used by the retry mechanism to re-send timed-out requests.
+    fn queue_mstp_retransmit(&mut self, npdu: Vec<u8>, dest_mac: u8) {
+        debug!(
+            "Queuing MS/TP retransmit: {} bytes to MAC {} (queue_len={})",
+            npdu.len(),
+            dest_mac,
+            self.mstp_send_queue.len() + 1
+        );
+        self.mstp_send_queue.push((npdu, dest_mac));
+    }
+
+    /// Drain the MS/TP send queue and return all pending transmissions
+    ///
+    /// The caller (main loop) should call this periodically and send the frames
+    /// via the MS/TP driver.
+    pub fn drain_mstp_send_queue(&mut self) -> Vec<(Vec<u8>, u8)> {
+        self.mstp_send_queue.drain(..).collect()
     }
 
     /// Send an Abort PDU to the IP client for a timed-out transaction
@@ -1111,6 +1163,7 @@ impl BacnetGateway {
                                                 mstp_dest,
                                                 service,
                                                 true, // Segmented request
+                                                routed_npdu.clone(), // Original NPDU for retry
                                             );
                                             if let Err(e) = self.transactions.add(transaction) {
                                                 debug!("Failed to create transaction for reassembled request: {}", e);
@@ -1141,6 +1194,7 @@ impl BacnetGateway {
                     }
 
                     // Create transaction for confirmed requests (non-segmented)
+                    // We need to create the transaction BEFORE routing, so we can capture the routed NPDU
                     if apdu_info.apdu_type == ApduTypeClass::ConfirmedRequest && !apdu_info.segmented {
                         if let (Some(invoke_id), Some(service_raw)) = (apdu_info.invoke_id, apdu_info.service) {
                             // Determine destination MS/TP address early (needed for transaction key)
@@ -1158,19 +1212,49 @@ impl BacnetGateway {
 
                             // Convert service code to ConfirmedServiceChoice
                             if let Ok(service) = ConfirmedServiceChoice::try_from(service_raw) {
-                                let transaction = PendingTransaction::new(
-                                    invoke_id,
-                                    source_addr,
-                                    npdu.source.as_ref().map(|s| s.network),
-                                    npdu.source.as_ref().map(|s| s.address.clone()).unwrap_or_default(),
-                                    self.mstp_network,
-                                    dest_mac,
-                                    service,
-                                    false, // Non-segmented
-                                );
+                                // Build routed NPDU early so we can store it in the transaction
+                                let (mstp_dest, final_delivery) = if let Some(ref dest) = npdu.destination {
+                                    if dest.network == self.mstp_network {
+                                        let addr = if dest.address.is_empty() { 255 } else { dest.address[0] };
+                                        (addr, true)
+                                    } else if dest.network == 0xFFFF {
+                                        (255, true)
+                                    } else if dest.network == self.ip_network {
+                                        // Don't create transaction for messages to IP network
+                                        (0, false)
+                                    } else {
+                                        (255, false)
+                                    }
+                                } else {
+                                    (255, true)
+                                };
 
-                                if let Err(e) = self.transactions.add(transaction) {
-                                    debug!("Failed to create transaction for invoke_id={}: {}", invoke_id, e);
+                                // Only create transaction if message is for MS/TP network
+                                if mstp_dest > 0 {
+                                    // Build routed NPDU now so we can store it
+                                    if let Ok(routed_npdu) = build_routed_npdu(
+                                        npdu_data,
+                                        self.ip_network,
+                                        &ip_to_mac(&source_addr),
+                                        &npdu,
+                                        final_delivery,
+                                    ) {
+                                        let transaction = PendingTransaction::new(
+                                            invoke_id,
+                                            source_addr,
+                                            npdu.source.as_ref().map(|s| s.network),
+                                            npdu.source.as_ref().map(|s| s.address.clone()).unwrap_or_default(),
+                                            self.mstp_network,
+                                            dest_mac,
+                                            service,
+                                            false, // Non-segmented
+                                            routed_npdu, // Original NPDU for retry
+                                        );
+
+                                        if let Err(e) = self.transactions.add(transaction) {
+                                            debug!("Failed to create transaction for invoke_id={}: {}", invoke_id, e);
+                                        }
+                                    }
                                 }
                             }
                         }

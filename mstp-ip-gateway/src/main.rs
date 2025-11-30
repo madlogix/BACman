@@ -454,10 +454,27 @@ fn main() -> anyhow::Result<()> {
                 let timeout_count = gw.process_transaction_timeouts();
                 if timeout_count > 0 {
                     info!(
-                        "Transaction timeouts: {} aborted, {} active",
+                        "Transaction timeouts: {} processed, {} active",
                         timeout_count,
                         gw.active_transaction_count()
                     );
+                }
+
+                // Drain MS/TP send queue and transmit retries
+                let retries = gw.drain_mstp_send_queue();
+                if !retries.is_empty() {
+                    drop(gw); // Release gateway lock before acquiring driver lock
+                    if let Ok(mut driver) = mstp_driver.lock() {
+                        for (npdu, dest_mac) in retries {
+                            info!(
+                                "Retransmitting {} bytes to MS/TP MAC {}",
+                                npdu.len(), dest_mac
+                            );
+                            if let Err(e) = driver.send_frame(&npdu, dest_mac, true) {
+                                warn!("Failed to retransmit to MS/TP {}: {}", dest_mac, e);
+                            }
+                        }
+                    }
                 }
             }
         }

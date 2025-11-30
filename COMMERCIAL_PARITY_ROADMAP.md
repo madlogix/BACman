@@ -12,7 +12,7 @@
 | Phase | Description | Status | Completion |
 |-------|-------------|--------|------------|
 | Phase 1-4 | Core Routing & Transaction Tracking | COMPLETE | 100% |
-| Phase 5 | Production Ready | IN PROGRESS | 55% |
+| Phase 5 | Production Ready | IN PROGRESS | 70% |
 | Phase 6 | Full Commercial | NOT STARTED | 0% |
 | Phase 7 | Enterprise Features | NOT STARTED | 0% |
 
@@ -126,14 +126,20 @@
 
 **Implementation:** `mstp-ip-gateway/src/local_device.rs` - NetworkPort struct with full property support
 
-### 5.4 Retry Mechanism
+### 5.4 Retry Mechanism ✓ COMPLETE
 > Retry failed transmissions before aborting
 
-- [ ] **5.4.1** Add retry_count field to PendingTransaction
-- [ ] **5.4.2** Implement configurable max_retries (default: 3)
-- [ ] **5.4.3** On timeout, retry transmission if retries remaining
-- [ ] **5.4.4** Only send Abort after all retries exhausted
-- [ ] **5.4.5** Add exponential backoff between retries
+- [x] **5.4.1** Add retry_count field to PendingTransaction (already existed)
+- [x] **5.4.2** Implement configurable max_retries (default: 3) (already existed)
+- [x] **5.4.3** On timeout, retry transmission if retries remaining
+- [x] **5.4.4** Only send Abort after all retries exhausted
+- [x] **5.4.5** Add exponential backoff between retries (1.5x per retry)
+- [x] **5.4.6** Store original NPDU for retransmission
+
+**Implementation:**
+- `mstp-ip-gateway/src/transaction.rs` - `original_npdu` field, exponential backoff in `retry()`
+- `mstp-ip-gateway/src/gateway.rs` - `process_transaction_timeouts()` with retry logic
+- `mstp-ip-gateway/src/main.rs` - `drain_mstp_send_queue()` integration
 
 **Testing Checklist:**
 - [ ] Noisy network: requests eventually succeed

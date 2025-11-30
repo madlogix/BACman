@@ -130,6 +130,9 @@ pub struct PendingTransaction {
 
     /// Maximum retries allowed
     pub max_retries: u8,
+
+    /// Original NPDU data for retransmission (routed format, ready to send to MS/TP)
+    pub original_npdu: Vec<u8>,
 }
 
 impl PendingTransaction {
@@ -144,6 +147,7 @@ impl PendingTransaction {
         dest_mac: u8,
         service: ConfirmedServiceChoice,
         segmented: bool,
+        original_npdu: Vec<u8>,
     ) -> Self {
         let timeout = service_timeout(service);
 
@@ -160,6 +164,7 @@ impl PendingTransaction {
             timeout,
             retries: 0,
             max_retries: DEFAULT_MAX_RETRIES,
+            original_npdu,
         }
     }
 
@@ -178,13 +183,25 @@ impl PendingTransaction {
         self.retries >= self.max_retries
     }
 
-    /// Increment retry count and reset timestamp
+    /// Increment retry count and reset timestamp with exponential backoff
+    ///
+    /// Implements exponential backoff: timeout increases by 50% with each retry.
+    /// For example, if base timeout is 10s:
+    /// - Retry 1: 15s (10s * 1.5)
+    /// - Retry 2: 22.5s (15s * 1.5)
+    /// - Retry 3: 33.75s (22.5s * 1.5)
     pub fn retry(&mut self) {
         self.retries += 1;
         self.created_at = Instant::now();
+
+        // Apply exponential backoff (50% increase per retry)
+        // This gives devices more time to respond on subsequent attempts
+        self.timeout = Duration::from_secs_f32(self.timeout.as_secs_f32() * 1.5);
+
         debug!(
-            "Retrying transaction invoke_id={} to MS/TP {} (retry {}/{})",
-            self.invoke_id, self.dest_mac, self.retries, self.max_retries
+            "Retrying transaction invoke_id={} to MS/TP {} (retry {}/{}, timeout={:.1}s)",
+            self.invoke_id, self.dest_mac, self.retries, self.max_retries,
+            self.timeout.as_secs_f32()
         );
     }
 }
@@ -463,6 +480,7 @@ mod tests {
             10,
             ConfirmedServiceChoice::ReadProperty,
             false,
+            vec![0x01, 0x08, 0x00, 0x01, 0x01, 0x0A], // Mock NPDU
         );
 
         assert!(table.add(transaction).is_ok());
@@ -481,6 +499,7 @@ mod tests {
             10,
             ConfirmedServiceChoice::ReadProperty,
             false,
+            vec![0x01, 0x08, 0x00, 0x01, 0x01, 0x0A], // Mock NPDU
         );
         let transaction2 = transaction1.clone();
 
@@ -500,6 +519,7 @@ mod tests {
             10,
             ConfirmedServiceChoice::ReadProperty,
             false,
+            vec![0x01, 0x08, 0x00, 0x01, 0x01, 0x0A], // Mock NPDU
         );
 
         table.add(transaction).unwrap();
@@ -524,6 +544,7 @@ mod tests {
             10,
             ConfirmedServiceChoice::ReadProperty,
             false,
+            vec![0x01, 0x08, 0x00, 0x01, 0x01, 0x0A], // Mock NPDU
         );
 
         table.add(transaction).unwrap();
@@ -549,6 +570,7 @@ mod tests {
             10,
             ConfirmedServiceChoice::ReadProperty,
             false,
+            vec![0x01, 0x08, 0x00, 0x01, 0x01, 0x0A], // Mock NPDU
         );
 
         // Set very short timeout for testing
@@ -581,16 +603,20 @@ mod tests {
             10,
             ConfirmedServiceChoice::ReadProperty,
             false,
+            vec![0x01, 0x08, 0x00, 0x01, 0x01, 0x0A], // Mock NPDU
         );
 
         table.add(transaction).unwrap();
 
         let mut tx = table.remove(42, 10).unwrap();
         assert_eq!(tx.retries, 0);
+        let original_timeout = tx.timeout;
 
         tx.retry();
         assert_eq!(tx.retries, 1);
         assert!(!tx.retries_exhausted());
+        // Check exponential backoff increased timeout
+        assert!(tx.timeout > original_timeout);
 
         tx.max_retries = 1;
         assert!(tx.retries_exhausted());
@@ -625,6 +651,7 @@ mod tests {
             10,
             ConfirmedServiceChoice::ReadProperty,
             false,
+            vec![0x01, 0x08, 0x00, 0x01, 0x01, 0x0A], // Mock NPDU
         );
         let tx2 = PendingTransaction::new(
             2,
@@ -635,6 +662,7 @@ mod tests {
             11,
             ConfirmedServiceChoice::ReadProperty,
             false,
+            vec![0x01, 0x08, 0x00, 0x01, 0x01, 0x0A], // Mock NPDU
         );
         let tx3 = PendingTransaction::new(
             3,
@@ -645,6 +673,7 @@ mod tests {
             12,
             ConfirmedServiceChoice::ReadProperty,
             false,
+            vec![0x01, 0x08, 0x00, 0x01, 0x01, 0x0A], // Mock NPDU
         );
 
         assert!(table.add(tx1).is_ok());
@@ -668,6 +697,7 @@ mod tests {
             10,
             ConfirmedServiceChoice::ReadProperty,
             false,
+            vec![0x01, 0x08, 0x00, 0x01, 0x01, 0x0A], // Mock NPDU
         );
 
         table.add(tx).unwrap();
