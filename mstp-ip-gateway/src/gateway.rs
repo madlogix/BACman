@@ -31,6 +31,8 @@ const BVLC_ORIGINAL_BROADCAST: u8 = 0x0B;
 const NL_WHO_IS_ROUTER_TO_NETWORK: u8 = 0x00;
 const NL_I_AM_ROUTER_TO_NETWORK: u8 = 0x01;
 const NL_REJECT_MESSAGE_TO_NETWORK: u8 = 0x03;
+const NL_INITIALIZE_ROUTING_TABLE: u8 = 0x06;
+const NL_INITIALIZE_ROUTING_TABLE_ACK: u8 = 0x07;
 
 /// Reject-Message-To-Network reason codes (ASHRAE 135 Annex R)
 /// All codes are defined per the BACnet standard, though not all are currently used.
@@ -88,6 +90,28 @@ struct ForeignDeviceEntry {
     ttl_seconds: u16,
     /// Time when entry was registered/refreshed
     registered_at: Instant,
+}
+
+/// Broadcast Distribution Table entry (ASHRAE 135 Annex J.3)
+/// Represents a peer BBMD for broadcast distribution across subnets
+#[derive(Debug, Clone)]
+struct BdtEntry {
+    /// IP address and port of the peer BBMD
+    address: SocketAddr,
+    /// Broadcast distribution mask (subnet mask)
+    /// Common values: [255,255,255,0] for /24, [255,255,255,255] for host-specific
+    mask: Ipv4Addr,
+}
+
+/// Routing table entry for Initialize-Routing-Table (ASHRAE 135 Clause 6.4)
+#[derive(Debug, Clone)]
+struct RoutingTableEntry {
+    /// Destination network number
+    network: u16,
+    /// Port ID (0 if directly connected)
+    port_id: u8,
+    /// Port information (MAC address length + MAC address bytes)
+    port_info: Vec<u8>,
 }
 
 impl<T> AddressEntry<T> {
@@ -151,6 +175,25 @@ struct SegmentedRequestInfo {
     created_at: Instant,
 }
 
+/// Segment transmission tracking for retransmission
+#[derive(Debug, Clone)]
+struct SegmentTransmission {
+    /// Invoke ID
+    invoke_id: u8,
+    /// Sequence number of this segment
+    sequence_number: u8,
+    /// Segment data (full APDU segment)
+    segment_data: Vec<u8>,
+    /// Destination address
+    dest_addr: SocketAddr,
+    /// Timestamp when segment was sent
+    sent_at: Instant,
+    /// Number of retransmission attempts
+    retry_count: u8,
+    /// Whether ACK has been received for this segment
+    acked: bool,
+}
+
 /// BACnet Gateway
 pub struct BacnetGateway {
     // Network configuration
@@ -171,6 +214,14 @@ pub struct BacnetGateway {
     // Foreign Device Table (ASHRAE 135 Annex J.5)
     // Key is IP address to prevent duplicates on re-registration
     foreign_device_table: HashMap<SocketAddr, ForeignDeviceEntry>,
+
+    // Broadcast Distribution Table (ASHRAE 135 Annex J.3)
+    // List of peer BBMDs for broadcast distribution across subnets
+    broadcast_distribution_table: Vec<BdtEntry>,
+
+    // Routing table for Initialize-Routing-Table (ASHRAE 135 Clause 6.4)
+    // Key is destination network number
+    routing_table: HashMap<u16, RoutingTableEntry>,
 
     // Address aging configuration
     address_max_age: Duration,
@@ -200,6 +251,10 @@ pub struct BacnetGateway {
     // Segmented request header info (keyed by invoke_id)
     // Used to reconstruct APDU after reassembly
     segmented_request_info: HashMap<u8, SegmentedRequestInfo>,
+
+    // Segment transmission tracking for retransmission
+    // Key is (invoke_id, sequence_number)
+    segment_transmissions: HashMap<(u8, u8), SegmentTransmission>,
 }
 
 /// Gateway statistics
@@ -251,6 +306,8 @@ impl BacnetGateway {
             mstp_to_ip: HashMap::new(),
             ip_to_mstp: HashMap::new(),
             foreign_device_table: HashMap::new(),
+            broadcast_distribution_table: Vec::new(),
+            routing_table: HashMap::new(),
             address_max_age: DEFAULT_ADDRESS_AGE,
             ip_send_queue: Vec::new(),
             mstp_send_queue: Vec::new(),
@@ -260,6 +317,7 @@ impl BacnetGateway {
             transactions: TransactionTable::new(),
             segmentation: SegmentationManager::new(),
             segmented_request_info: HashMap::new(),
+            segment_transmissions: HashMap::new(),
         }
     }
 
@@ -679,6 +737,111 @@ impl BacnetGateway {
         self.segmentation.active_reassemblies()
     }
 
+    /// Handle incoming Segment-ACK (marks segments as acknowledged)
+    pub fn handle_segment_ack(&mut self, invoke_id: u8, sequence_number: u8, negative: bool) {
+        if negative {
+            // Segment-NAK: retransmit the requested segment
+            if let Some(segment) = self.segment_transmissions.get_mut(&(invoke_id, sequence_number)) {
+                debug!(
+                    "Segment-NAK received: invoke_id={} seq={}, retransmitting",
+                    invoke_id, sequence_number
+                );
+                segment.retry_count += 1;
+                segment.sent_at = Instant::now();
+                // Retransmit will happen in check_segment_timeouts
+            } else {
+                warn!(
+                    "Segment-NAK for unknown segment: invoke_id={} seq={}",
+                    invoke_id, sequence_number
+                );
+            }
+        } else {
+            // Positive ACK: mark segments up to sequence_number as acknowledged
+            let mut to_remove = Vec::new();
+            for (&(seg_invoke_id, seg_seq), segment) in &mut self.segment_transmissions {
+                if seg_invoke_id == invoke_id && seg_seq <= sequence_number {
+                    segment.acked = true;
+                    to_remove.push((seg_invoke_id, seg_seq));
+                }
+            }
+            // Remove acknowledged segments
+            for key in to_remove {
+                self.segment_transmissions.remove(&key);
+                trace!("Segment acknowledged: invoke_id={} seq={}", key.0, key.1);
+            }
+        }
+    }
+
+    /// Check for segment transmission timeouts and retransmit if needed
+    /// Call this periodically (e.g., every second)
+    pub fn check_segment_timeouts(&mut self) -> Result<(), GatewayError> {
+        const SEGMENT_TIMEOUT: Duration = Duration::from_secs(3);
+        const MAX_RETRIES: u8 = 3;
+
+        let mut to_retransmit = Vec::new();
+        let mut to_remove = Vec::new();
+
+        for (&key, segment) in &self.segment_transmissions {
+            if segment.acked {
+                continue;
+            }
+
+            if segment.sent_at.elapsed() > SEGMENT_TIMEOUT {
+                if segment.retry_count >= MAX_RETRIES {
+                    warn!(
+                        "Segment transmission failed after {} retries: invoke_id={} seq={}",
+                        MAX_RETRIES, segment.invoke_id, segment.sequence_number
+                    );
+                    to_remove.push(key);
+                } else {
+                    debug!(
+                        "Segment timeout, retransmitting: invoke_id={} seq={} retry={}",
+                        segment.invoke_id, segment.sequence_number, segment.retry_count + 1
+                    );
+                    to_retransmit.push((key, segment.segment_data.clone(), segment.dest_addr));
+                }
+            }
+        }
+
+        // Retransmit timed-out segments
+        for ((invoke_id, seq), data, dest) in to_retransmit {
+            if let Some(segment) = self.segment_transmissions.get_mut(&(invoke_id, seq)) {
+                segment.retry_count += 1;
+                segment.sent_at = Instant::now();
+                self.send_ip_packet(&data, dest)?;
+            }
+        }
+
+        // Remove failed segments
+        for key in to_remove {
+            self.segment_transmissions.remove(&key);
+        }
+
+        Ok(())
+    }
+
+    /// Track a transmitted segment for retransmission
+    fn track_segment_transmission(
+        &mut self,
+        invoke_id: u8,
+        sequence_number: u8,
+        segment_data: Vec<u8>,
+        dest_addr: SocketAddr,
+    ) {
+        self.segment_transmissions.insert(
+            (invoke_id, sequence_number),
+            SegmentTransmission {
+                invoke_id,
+                sequence_number,
+                segment_data,
+                dest_addr,
+                sent_at: Instant::now(),
+                retry_count: 0,
+                acked: false,
+            },
+        );
+    }
+
     /// Route a frame from MS/TP to IP
     ///
     /// Returns `Ok(None)` on success, or `Ok(Some((reject_npdu, dest_addr)))` if a reject
@@ -852,13 +1015,16 @@ impl BacnetGateway {
               bvlc.len(), dest_addr, &bvlc[..bvlc.len().min(20)]);
         self.send_ip_packet(&bvlc, dest_addr)?;
 
-        // Also forward to registered foreign devices if this is a broadcast
+        // Also forward to registered foreign devices and BDT entries if this is a broadcast
         let is_broadcast_or_multicast = match dest_addr.ip() {
             IpAddr::V4(ipv4) => ipv4.is_broadcast() || ipv4.is_multicast(),
             IpAddr::V6(ipv6) => ipv6.is_multicast(),
         };
         if is_broadcast_or_multicast {
             self.forward_to_foreign_devices(&bvlc)?;
+            // Forward to BDT entries - use local IP as source for Forwarded-NPDU
+            let local_addr = SocketAddr::new(IpAddr::V4(self.local_ip), self.local_port);
+            self.forward_to_bdt_entries(&routed_npdu, local_addr)?;
         }
 
         self.stats.mstp_to_ip_packets += 1;
@@ -995,6 +1161,29 @@ impl BacnetGateway {
         Ok(())
     }
 
+    /// Forward broadcast to BDT entries (ASHRAE 135 Annex J.3)
+    /// Sends Forwarded-NPDU messages to peer BBMDs in the Broadcast Distribution Table
+    fn forward_to_bdt_entries(&mut self, npdu_data: &[u8], source_addr: SocketAddr) -> Result<(), GatewayError> {
+        if self.broadcast_distribution_table.is_empty() {
+            return Ok(());
+        }
+
+        // Build Forwarded-NPDU with original source address
+        let forwarded = self.build_forwarded_npdu(npdu_data, source_addr);
+
+        // Forward to each BDT entry
+        for entry in &self.broadcast_distribution_table {
+            if let Some(ref socket) = self.ip_socket {
+                if let Err(e) = socket.send_to(&forwarded, entry.address) {
+                    warn!("Failed to forward to BDT entry {}: {}", entry.address, e);
+                } else {
+                    trace!("Forwarded broadcast to BDT entry: {}", entry.address);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Handle network layer messages from MS/TP side
     fn handle_network_message_from_mstp(
         &mut self,
@@ -1091,6 +1280,12 @@ impl BacnetGateway {
             }
             BVLC_DELETE_FDT_ENTRY => {
                 return self.handle_delete_fdt_entry(data, source_addr);
+            }
+            BVLC_READ_BDT => {
+                return self.handle_read_bdt(source_addr);
+            }
+            BVLC_WRITE_BDT => {
+                return self.handle_write_bdt(data, source_addr);
             }
             BVLC_DISTRIBUTE_BROADCAST => {
                 return self.handle_distribute_broadcast(data, source_addr);
@@ -1545,6 +1740,92 @@ impl BacnetGateway {
         Ok(None)
     }
 
+    /// Handle Read-Broadcast-Distribution-Table BVLC message (ASHRAE 135 Annex J.3)
+    fn handle_read_bdt(&mut self, source_addr: SocketAddr) -> Result<Option<(Vec<u8>, u8)>, GatewayError> {
+        debug!("Read-BDT request from {}", source_addr);
+
+        // Build BDT response
+        let response = self.build_read_bdt_ack();
+        self.send_ip_packet(&response, source_addr)?;
+
+        Ok(None)
+    }
+
+    /// Handle Write-Broadcast-Distribution-Table BVLC message (ASHRAE 135 Annex J.3)
+    fn handle_write_bdt(
+        &mut self,
+        data: &[u8],
+        source_addr: SocketAddr,
+    ) -> Result<Option<(Vec<u8>, u8)>, GatewayError> {
+        if data.len() < 4 {
+            warn!(
+                "Malformed Write-BDT from {}: too short ({} bytes) - {}",
+                source_addr,
+                data.len(),
+                hex_dump(data, 32)
+            );
+            let result = self.build_bvlc_result(BVLC_RESULT_WRITE_BDT_NAK);
+            self.send_ip_packet(&result, source_addr)?;
+            return Ok(None);
+        }
+
+        // Each BDT entry is 10 bytes: 4 IP + 2 port + 4 mask
+        let entry_data = &data[4..];
+        if entry_data.len() % 10 != 0 {
+            warn!(
+                "Invalid Write-BDT from {}: payload not multiple of 10 bytes ({} bytes) - {}",
+                source_addr,
+                entry_data.len(),
+                hex_dump(data, 32)
+            );
+            let result = self.build_bvlc_result(BVLC_RESULT_WRITE_BDT_NAK);
+            self.send_ip_packet(&result, source_addr)?;
+            return Ok(None);
+        }
+
+        let num_entries = entry_data.len() / 10;
+        let mut new_bdt = Vec::new();
+
+        for i in 0..num_entries {
+            let offset = i * 10;
+            let ip = Ipv4Addr::new(
+                entry_data[offset],
+                entry_data[offset + 1],
+                entry_data[offset + 2],
+                entry_data[offset + 3],
+            );
+            let port = ((entry_data[offset + 4] as u16) << 8) | (entry_data[offset + 5] as u16);
+            let mask = Ipv4Addr::new(
+                entry_data[offset + 6],
+                entry_data[offset + 7],
+                entry_data[offset + 8],
+                entry_data[offset + 9],
+            );
+
+            new_bdt.push(BdtEntry {
+                address: SocketAddr::new(IpAddr::V4(ip), port),
+                mask,
+            });
+        }
+
+        info!(
+            "Write-BDT from {}: {} entries updated",
+            source_addr,
+            new_bdt.len()
+        );
+        for (i, entry) in new_bdt.iter().enumerate() {
+            debug!("  BDT[{}]: {} mask {}", i, entry.address, entry.mask);
+        }
+
+        self.broadcast_distribution_table = new_bdt;
+
+        // Send success response
+        let result = self.build_bvlc_result(BVLC_RESULT_SUCCESS);
+        self.send_ip_packet(&result, source_addr)?;
+
+        Ok(None)
+    }
+
     /// Handle Distribute-Broadcast-To-Network BVLC message (ASHRAE 135 Annex J.5.4)
     fn handle_distribute_broadcast(
         &mut self,
@@ -1657,6 +1938,10 @@ impl BacnetGateway {
                     self.send_ip_packet(&bvlc, source_addr)?;
                 }
             }
+            NL_INITIALIZE_ROUTING_TABLE => {
+                debug!("Received Initialize-Routing-Table from IP (source: {})", source_addr);
+                return self.handle_initialize_routing_table(data, npdu_len, source_addr);
+            }
             _ => {
                 // Forward to MS/TP network - final delivery
                 let routed_npdu = build_routed_npdu(data, self.ip_network, &ip_to_mac(&source_addr), npdu, true)?;
@@ -1664,6 +1949,102 @@ impl BacnetGateway {
             }
         }
         Ok(None)
+    }
+
+    /// Handle Initialize-Routing-Table network layer message (ASHRAE 135 Clause 6.4)
+    fn handle_initialize_routing_table(
+        &mut self,
+        data: &[u8],
+        npdu_len: usize,
+        source_addr: SocketAddr,
+    ) -> Result<Option<(Vec<u8>, u8)>, GatewayError> {
+        // Skip message type byte
+        let mut offset = npdu_len + 1;
+
+        // Parse number of ports
+        if offset >= data.len() {
+            warn!("Malformed Initialize-Routing-Table: missing port count");
+            return Err(GatewayError::InvalidFrame);
+        }
+        let num_ports = data[offset];
+        offset += 1;
+
+        info!(
+            "Initialize-Routing-Table from {}: {} ports",
+            source_addr, num_ports
+        );
+
+        // Clear existing routing table
+        self.routing_table.clear();
+
+        // Parse routing table entries
+        for port_idx in 0..num_ports {
+            if offset >= data.len() {
+                warn!("Malformed Initialize-Routing-Table: truncated port data");
+                return Err(GatewayError::InvalidFrame);
+            }
+
+            // Network count for this port
+            let net_count = data[offset];
+            offset += 1;
+
+            // Networks reachable via this port
+            for _ in 0..net_count {
+                if offset + 1 >= data.len() {
+                    warn!("Malformed Initialize-Routing-Table: truncated network data");
+                    return Err(GatewayError::InvalidFrame);
+                }
+                let network = ((data[offset] as u16) << 8) | (data[offset + 1] as u16);
+                offset += 2;
+
+                // Port info length
+                if offset >= data.len() {
+                    warn!("Malformed Initialize-Routing-Table: missing port info length");
+                    return Err(GatewayError::InvalidFrame);
+                }
+                let port_info_len = data[offset] as usize;
+                offset += 1;
+
+                // Port info data (MAC address)
+                if offset + port_info_len > data.len() {
+                    warn!("Malformed Initialize-Routing-Table: truncated port info");
+                    return Err(GatewayError::InvalidFrame);
+                }
+                let port_info = data[offset..offset + port_info_len].to_vec();
+                offset += port_info_len;
+
+                debug!(
+                    "  Port {}: network {} via {:?}",
+                    port_idx, network, port_info
+                );
+
+                // Store routing entry
+                self.routing_table.insert(
+                    network,
+                    RoutingTableEntry {
+                        network,
+                        port_id: port_idx,
+                        port_info,
+                    },
+                );
+            }
+        }
+
+        // Send Initialize-Routing-Table-Ack
+        let ack = self.build_initialize_routing_table_ack();
+        let bvlc = build_bvlc(&ack, false);
+        self.send_ip_packet(&bvlc, source_addr)?;
+
+        Ok(None)
+    }
+
+    /// Build Initialize-Routing-Table-Ack message (ASHRAE 135 Clause 6.4)
+    fn build_initialize_routing_table_ack(&self) -> Vec<u8> {
+        vec![
+            0x01, // NPDU version
+            0x80, // Control: network layer message, no DNET/SNET
+            NL_INITIALIZE_ROUTING_TABLE_ACK,
+        ]
     }
 
     /// Build a BVLC-Result message (ASHRAE 135 Annex J.2.1)
@@ -1699,6 +2080,30 @@ impl BacnetGateway {
                 let remaining = entry.remaining_ttl();
                 result.push((remaining >> 8) as u8);
                 result.push((remaining & 0xFF) as u8);
+            }
+        }
+
+        result
+    }
+
+    /// Build a Read-Broadcast-Distribution-Table-Ack message (ASHRAE 135 Annex J.3)
+    fn build_read_bdt_ack(&self) -> Vec<u8> {
+        // Each BDT entry is 10 bytes: 4-byte IP + 2-byte port + 4-byte mask
+        let entry_count = self.broadcast_distribution_table.len();
+        let length = 4 + (entry_count * 10);
+
+        let mut result = Vec::with_capacity(length);
+        result.push(0x81);
+        result.push(BVLC_READ_BDT_ACK);
+        result.push((length >> 8) as u8);
+        result.push((length & 0xFF) as u8);
+
+        for entry in &self.broadcast_distribution_table {
+            if let SocketAddr::V4(v4) = entry.address {
+                result.extend_from_slice(&v4.ip().octets());
+                result.push((v4.port() >> 8) as u8);
+                result.push((v4.port() & 0xFF) as u8);
+                result.extend_from_slice(&entry.mask.octets());
             }
         }
 
