@@ -9,6 +9,10 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bacnet_rs::app::{Apdu, SegmentationManager};
+use bacnet_rs::service::{AbortReason, ConfirmedServiceChoice};
+use crate::transaction::{PendingTransaction, TransactionTable, TransactionStats};
+
 /// BACnet/IP BVLC function codes (ASHRAE 135 Annex J)
 const BVLC_RESULT: u8 = 0x00;
 const BVLC_WRITE_BDT: u8 = 0x01;
@@ -130,6 +134,23 @@ impl ForeignDeviceEntry {
     }
 }
 
+/// Information stored from first segment for APDU reconstruction
+#[derive(Debug, Clone)]
+struct SegmentedRequestInfo {
+    /// Service choice from first segment
+    service_choice: u8,
+    /// Max APDU length accepted (from first segment header)
+    max_apdu_accepted: u8,
+    /// Whether segmented response is accepted
+    segmented_response_accepted: bool,
+    /// Original NPDU data for routing
+    npdu_data: Vec<u8>,
+    /// Source IP address
+    source_addr: SocketAddr,
+    /// Timestamp when first segment was received
+    created_at: Instant,
+}
+
 /// BACnet Gateway
 pub struct BacnetGateway {
     // Network configuration
@@ -165,6 +186,16 @@ pub struct BacnetGateway {
 
     // Router announcement sent flag
     router_announced: bool,
+
+    // Transaction tracking for confirmed services
+    transactions: TransactionTable,
+
+    // Segmentation manager for reassembling large messages
+    segmentation: SegmentationManager,
+
+    // Segmented request header info (keyed by invoke_id)
+    // Used to reconstruct APDU after reassembly
+    segmented_request_info: HashMap<u8, SegmentedRequestInfo>,
 }
 
 /// Gateway statistics
@@ -207,6 +238,9 @@ impl BacnetGateway {
             stats: GatewayStats::default(),
             ip_socket: None,
             router_announced: false,
+            transactions: TransactionTable::new(),
+            segmentation: SegmentationManager::new(),
+            segmented_request_info: HashMap::new(),
         }
     }
 
@@ -297,6 +331,285 @@ impl BacnetGateway {
         self.ip_socket = Some(socket);
     }
 
+    /// Process transaction timeouts and send Abort PDUs to clients
+    ///
+    /// This should be called periodically (e.g., every 1 second) from the main loop.
+    /// Returns the number of transactions that timed out.
+    pub fn process_transaction_timeouts(&mut self) -> usize {
+        let timed_out = self.transactions.check_timeouts();
+        let count = timed_out.len();
+
+        for tx in timed_out {
+            if tx.retries < tx.max_retries {
+                // Could implement retry here - for now, we just abort after first timeout
+                // In a full implementation, we would re-queue the request
+                info!(
+                    "Transaction timeout (no retry): invoke_id={} service={:?} dest={}:{} age={:.1}s",
+                    tx.invoke_id,
+                    tx.service,
+                    tx.dest_network,
+                    tx.dest_mac,
+                    tx.created_at.elapsed().as_secs_f32()
+                );
+            }
+
+            // Send Abort PDU to the original IP client
+            if let Err(e) = self.send_abort_to_client(&tx, AbortReason::Other) {
+                warn!(
+                    "Failed to send timeout abort to {}: {}",
+                    tx.source_addr, e
+                );
+            }
+        }
+
+        if count > 0 {
+            debug!("Processed {} transaction timeout(s)", count);
+        }
+
+        count
+    }
+
+    /// Send an Abort PDU to the IP client for a timed-out transaction
+    fn send_abort_to_client(
+        &mut self,
+        tx: &PendingTransaction,
+        reason: AbortReason,
+    ) -> Result<(), GatewayError> {
+        // Build Abort APDU
+        let abort_apdu = Apdu::Abort {
+            server: true,  // Gateway is acting as server (forwarding abort)
+            invoke_id: tx.invoke_id,
+            abort_reason: reason as u8,
+        };
+
+        let apdu_bytes = abort_apdu.encode();
+
+        // Build NPDU (simple local response, no routing info needed)
+        let mut npdu = Vec::with_capacity(apdu_bytes.len() + 2);
+        npdu.push(0x01); // NPDU version
+        npdu.push(0x00); // Control: no routing info, expecting reply = false
+        npdu.extend_from_slice(&apdu_bytes);
+
+        // Build BVLC wrapper (Original-Unicast-NPDU)
+        let bvlc = build_bvlc(&npdu, false);
+
+        // Send to original client
+        debug!(
+            "Sending timeout Abort to {}: invoke_id={} reason={:?}",
+            tx.source_addr, tx.invoke_id, reason
+        );
+
+        self.send_ip_packet(&bvlc, tx.source_addr)
+    }
+
+    /// Get transaction table statistics
+    pub fn get_transaction_stats(&self) -> &TransactionStats {
+        self.transactions.stats()
+    }
+
+    /// Get number of active transactions
+    pub fn active_transaction_count(&self) -> usize {
+        self.transactions.len()
+    }
+
+    /// Process a segmented request from IP and reassemble
+    ///
+    /// Returns:
+    /// - Ok(Some((complete_apdu, npdu_data))) if reassembly is complete
+    /// - Ok(None) if more segments are needed (SegmentAck sent)
+    /// - Err if there's a protocol error
+    ///
+    /// The `first_segment_info` should be provided only for sequence number 0 and contains
+    /// the APDU header info needed to reconstruct the complete non-segmented APDU.
+    fn process_segmented_request(
+        &mut self,
+        invoke_id: u8,
+        sequence_number: u8,
+        proposed_window_size: u8,
+        segment_data: &[u8],
+        more_follows: bool,
+        source_addr: SocketAddr,
+        first_segment_info: Option<(u8, u8, bool, Vec<u8>)>, // (service_choice, max_apdu, seg_resp_accepted, npdu_data)
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>, GatewayError> {
+        // Use default max APDU length (1476 for BACnet/IP)
+        const MAX_APDU_LENGTH: u16 = 1476;
+
+        // Store header info from first segment
+        if let Some((service_choice, max_apdu_accepted, segmented_response_accepted, npdu_data)) = first_segment_info {
+            self.segmented_request_info.insert(
+                invoke_id,
+                SegmentedRequestInfo {
+                    service_choice,
+                    max_apdu_accepted,
+                    segmented_response_accepted,
+                    npdu_data,
+                    source_addr,
+                    created_at: Instant::now(),
+                },
+            );
+            debug!(
+                "Stored segmented request info: invoke_id={} service={}",
+                invoke_id, service_choice
+            );
+        }
+
+        // Process the segment
+        match self.segmentation.process_segment(
+            invoke_id,
+            sequence_number,
+            segment_data.to_vec(),
+            more_follows,
+            MAX_APDU_LENGTH,
+        ) {
+            Ok(Some(complete_service_data)) => {
+                // Reassembly complete - send final SegmentAck
+                debug!(
+                    "Segment reassembly complete: invoke_id={} total_size={}",
+                    invoke_id,
+                    complete_service_data.len()
+                );
+                self.send_segment_ack(
+                    invoke_id,
+                    sequence_number,
+                    proposed_window_size,
+                    false, // positive ack
+                    source_addr,
+                )?;
+
+                // Retrieve stored header info and build complete APDU
+                if let Some(info) = self.segmented_request_info.remove(&invoke_id) {
+                    // Build non-segmented ConfirmedRequest APDU
+                    // Format: type/flags(1) + max_apdu(1) + invoke_id(1) + service(1) + service_data
+                    let mut complete_apdu = Vec::with_capacity(4 + complete_service_data.len());
+
+                    // Type byte: PDU Type=0 (ConfirmedRequest), no segmentation
+                    // Bit 1 (0x02) = segmented_response_accepted
+                    let mut type_byte: u8 = 0x00; // ConfirmedRequest, not segmented
+                    if info.segmented_response_accepted {
+                        type_byte |= 0x02;
+                    }
+                    complete_apdu.push(type_byte);
+
+                    // Max APDU length accepted
+                    complete_apdu.push(info.max_apdu_accepted);
+
+                    // Invoke ID
+                    complete_apdu.push(invoke_id);
+
+                    // Service choice
+                    complete_apdu.push(info.service_choice);
+
+                    // Service data (reassembled)
+                    complete_apdu.extend_from_slice(&complete_service_data);
+
+                    info!(
+                        "Reassembled APDU: invoke_id={} service={} total_len={} (from {} segments)",
+                        invoke_id,
+                        info.service_choice,
+                        complete_apdu.len(),
+                        sequence_number + 1
+                    );
+
+                    Ok(Some((complete_apdu, info.npdu_data)))
+                } else {
+                    // No header info stored - shouldn't happen
+                    warn!("No header info found for completed segmented request: invoke_id={}", invoke_id);
+                    Err(GatewayError::NpduError("Missing segmented request info".to_string()))
+                }
+            }
+            Ok(None) => {
+                // More segments needed - send SegmentAck
+                debug!(
+                    "Segment received: invoke_id={} seq={} more_follows={}",
+                    invoke_id, sequence_number, more_follows
+                );
+                self.send_segment_ack(
+                    invoke_id,
+                    sequence_number,
+                    proposed_window_size,
+                    false, // positive ack
+                    source_addr,
+                )?;
+                Ok(None)
+            }
+            Err(e) => {
+                warn!("Segment processing error: {:?}", e);
+                // Clean up stored info on error
+                self.segmented_request_info.remove(&invoke_id);
+                // Send negative SegmentAck
+                self.send_segment_ack(
+                    invoke_id,
+                    sequence_number,
+                    proposed_window_size,
+                    true, // negative ack
+                    source_addr,
+                )?;
+                Err(GatewayError::NpduError(format!("Segmentation error: {:?}", e)))
+            }
+        }
+    }
+
+    /// Send a SegmentAck PDU to an IP client
+    fn send_segment_ack(
+        &mut self,
+        invoke_id: u8,
+        sequence_number: u8,
+        window_size: u8,
+        negative: bool,
+        dest: SocketAddr,
+    ) -> Result<(), GatewayError> {
+        // Build SegmentAck APDU
+        let segment_ack = Apdu::SegmentAck {
+            negative,
+            server: true, // Gateway is acting as server
+            invoke_id,
+            sequence_number,
+            window_size: window_size.max(1), // Minimum window size is 1
+        };
+
+        let apdu_bytes = segment_ack.encode();
+
+        // Build NPDU (simple local response)
+        let mut npdu = Vec::with_capacity(apdu_bytes.len() + 2);
+        npdu.push(0x01); // NPDU version
+        npdu.push(0x00); // Control: no routing info
+        npdu.extend_from_slice(&apdu_bytes);
+
+        // Build BVLC wrapper
+        let bvlc = build_bvlc(&npdu, false);
+
+        trace!(
+            "Sending SegmentAck to {}: invoke_id={} seq={} negative={}",
+            dest, invoke_id, sequence_number, negative
+        );
+
+        self.send_ip_packet(&bvlc, dest)
+    }
+
+    /// Cleanup timed out segment reassembly buffers
+    /// Call this periodically (e.g., every 10 seconds)
+    pub fn cleanup_segment_buffers(&mut self) {
+        self.segmentation.cleanup_timed_out_buffers();
+
+        // Also clean up stale segmented request info (60 second timeout)
+        const SEGMENT_INFO_TIMEOUT: Duration = Duration::from_secs(60);
+        self.segmented_request_info.retain(|invoke_id, info| {
+            let keep = info.created_at.elapsed() < SEGMENT_INFO_TIMEOUT;
+            if !keep {
+                debug!(
+                    "Cleaned up stale segmented request info: invoke_id={}",
+                    invoke_id
+                );
+            }
+            keep
+        });
+    }
+
+    /// Get number of active segment reassemblies
+    pub fn active_reassemblies(&self) -> usize {
+        self.segmentation.active_reassemblies()
+    }
+
     /// Route a frame from MS/TP to IP
     ///
     /// Returns `Ok(None)` on success, or `Ok(Some((reject_npdu, dest_addr)))` if a reject
@@ -319,8 +632,8 @@ impl BacnetGateway {
             }
         }
 
-        debug!(
-            "Routing MS/TP->IP: src={} network_msg={} dest_present={} hop_count={:?}",
+        info!(
+            "MS/TP->IP route: src_mac={} network_msg={} dest_present={} hop_count={:?}",
             source_addr, npdu.network_message, npdu.destination_present, npdu.hop_count
         );
 
@@ -330,8 +643,67 @@ impl BacnetGateway {
                 .map(|()| None);
         }
 
-        // Determine destination
-        let dest_addr = if let Some(ref dest) = npdu.destination {
+        // Parse APDU for transaction tracking and response routing
+        let apdu_data = &data[_npdu_len..];
+        let mut response_dest: Option<SocketAddr> = None;
+
+        if !apdu_data.is_empty() {
+            match parse_apdu(apdu_data) {
+                Ok(apdu_info) => {
+                    // Check if this is a response to a confirmed request
+                    if apdu_info.is_response() {
+                        if let Some(invoke_id) = apdu_info.invoke_id {
+                            // For segmented responses, we need to keep the transaction alive
+                            // until the final segment is received (more_follows=false)
+                            let is_segmented_response = apdu_info.segmented
+                                && apdu_info.apdu_type == ApduTypeClass::ComplexAck;
+                            let is_final_segment = !apdu_info.more_follows;
+
+                            if is_segmented_response && !is_final_segment {
+                                // Segmented response with more segments coming - lookup but don't remove
+                                if let Some(transaction) = self.transactions.get(invoke_id, source_addr) {
+                                    debug!(
+                                        "Segmented response segment matched transaction: invoke_id={} service={:?} more_follows={}",
+                                        invoke_id,
+                                        transaction.service,
+                                        apdu_info.more_follows
+                                    );
+                                    response_dest = Some(transaction.source_addr);
+                                }
+                            } else {
+                                // Non-segmented response OR final segment - remove transaction
+                                if let Some(transaction) = self.transactions.remove(invoke_id, source_addr) {
+                                    debug!(
+                                        "Response matched transaction: invoke_id={} service={:?} age={:.2}s segmented={}",
+                                        invoke_id,
+                                        transaction.service,
+                                        transaction.created_at.elapsed().as_secs_f32(),
+                                        is_segmented_response
+                                    );
+                                    response_dest = Some(transaction.source_addr);
+                                } else {
+                                    // No matching transaction - will fall back to broadcast routing
+                                    trace!(
+                                        "No transaction found for response: invoke_id={} from MS/TP {}",
+                                        invoke_id, source_addr
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Log but don't fail - still route the packet
+                    trace!("Could not parse APDU for transaction tracking: {:?}", e);
+                }
+            }
+        }
+
+        // Determine destination - use transaction-based routing if available
+        let dest_addr = if let Some(unicast_dest) = response_dest {
+            // Response routing: send directly to original requester
+            unicast_dest
+        } else if let Some(ref dest) = npdu.destination {
             if dest.network == self.ip_network {
                 // Specific device on IP network
                 self.resolve_ip_address(&dest.address)?
@@ -356,23 +728,28 @@ impl BacnetGateway {
             self.get_broadcast_address()
         };
 
+        // Determine if this is a broadcast or unicast
+        let is_broadcast = match dest_addr.ip() {
+            IpAddr::V4(ipv4) => ipv4.is_broadcast() || ipv4.octets()[3] == 255,
+            IpAddr::V6(ipv6) => ipv6.is_multicast(),
+        };
+
         // Build NPDU with source network info
-        // MS/TP → IP: Never final delivery (going to IP network, not local MS/TP)
+        // For unicast responses going directly to IP client: final_delivery = true
+        // This strips DNET/DADR per ASHRAE 135 - the destination is the UDP endpoint itself
+        // For broadcasts: final_delivery = false (may be re-routed by other routers)
+        let final_delivery = !is_broadcast;
         let routed_npdu = build_routed_npdu(
             data,
             self.mstp_network,
             &[source_addr],
             &npdu,
-            false, // Not final delivery
+            final_delivery,
         )?;
-
-        // Wrap in Forwarded-NPDU for routed messages (ASHRAE 135 Annex J.4.5)
-        // For MS/TP->IP routing, use gateway's IP as source (MS/TP devices have no IP)
-        let gateway_addr = SocketAddr::new(IpAddr::V4(self.local_ip), self.local_port);
-        let bvlc = self.build_forwarded_npdu(&routed_npdu, gateway_addr);
+        let bvlc = self.build_original_npdu(&routed_npdu, is_broadcast);
 
         // Send via IP
-        trace!("MS/TP->IP: routing {} bytes to {} (BVLC: {:02X?})",
+        info!("MS/TP->IP SEND: {} bytes to {} (BVLC: {:02X?})",
               bvlc.len(), dest_addr, &bvlc[..bvlc.len().min(20)]);
         self.send_ip_packet(&bvlc, dest_addr)?;
 
@@ -433,6 +810,39 @@ impl BacnetGateway {
         let port = source_addr.port();
         result.push((port >> 8) as u8);
         result.push((port & 0xFF) as u8);
+
+        // NPDU
+        result.extend_from_slice(npdu);
+
+        result
+    }
+
+    /// Build an Original-Unicast-NPDU or Original-Broadcast-NPDU BVLC message
+    ///
+    /// This format is simpler than Forwarded-NPDU and is more widely accepted by
+    /// BACnet clients (like JCI CCT).
+    ///
+    /// # Arguments
+    /// * `npdu` - The NPDU data to send
+    /// * `is_broadcast` - If true, use Original-Broadcast-NPDU (0x0B), else Original-Unicast-NPDU (0x0A)
+    fn build_original_npdu(&self, npdu: &[u8], is_broadcast: bool) -> Vec<u8> {
+        // Original-Unicast/Broadcast-NPDU format:
+        // 0x81 (BVLC type)
+        // 0x0A (Original-Unicast) or 0x0B (Original-Broadcast)
+        // 2-byte length
+        // NPDU
+        let mut result = Vec::with_capacity(4 + npdu.len());
+
+        result.push(0x81); // BVLC type
+        if is_broadcast {
+            result.push(BVLC_ORIGINAL_BROADCAST);
+        } else {
+            result.push(BVLC_ORIGINAL_UNICAST);
+        }
+
+        let length = 4 + npdu.len();
+        result.push((length >> 8) as u8);
+        result.push((length & 0xFF) as u8);
 
         // NPDU
         result.extend_from_slice(npdu);
@@ -604,6 +1014,173 @@ impl BacnetGateway {
         // Handle network layer messages
         if npdu.network_message {
             return self.handle_network_message_from_ip(npdu_data, &npdu, source_addr);
+        }
+
+        // Parse APDU for transaction tracking (after NPDU header)
+        let (_npdu_parsed, npdu_len) = parse_npdu(npdu_data)?;
+        let apdu_data = &npdu_data[npdu_len..];
+
+        // Try to parse APDU and handle segmentation
+        if !apdu_data.is_empty() {
+            match parse_apdu(apdu_data) {
+                Ok(apdu_info) => {
+                    // Handle segmented requests - buffer and reassemble
+                    if apdu_info.segmented && apdu_info.apdu_type == ApduTypeClass::ConfirmedRequest {
+                        if let Some(invoke_id) = apdu_info.invoke_id {
+                            // Extract segment data (service data portion after APDU header)
+                            // APDU header for segmented: type(1) + max_info(1) + invoke_id(1) + seq(1) + window(1) + service(1) = 6 bytes
+                            let segment_header_len = 6;
+                            if apdu_data.len() > segment_header_len {
+                                let max_apdu_accepted = apdu_data[1];
+                                let sequence_number = apdu_data[3];
+                                let proposed_window_size = apdu_data[4];
+                                let service_choice = apdu_data[5];
+                                let segment_payload = &apdu_data[segment_header_len..];
+
+                                info!(
+                                    "Segmented request: invoke_id={} seq={} service={} more_follows={} payload_len={}",
+                                    invoke_id, sequence_number, service_choice, apdu_info.more_follows, segment_payload.len()
+                                );
+
+                                // For first segment (seq 0), store header info for APDU reconstruction
+                                let first_segment_info = if sequence_number == 0 {
+                                    Some((
+                                        service_choice,
+                                        max_apdu_accepted,
+                                        apdu_info.segmented_response_accepted,
+                                        npdu_data.to_vec(),
+                                    ))
+                                } else {
+                                    None
+                                };
+
+                                // Process segment
+                                match self.process_segmented_request(
+                                    invoke_id,
+                                    sequence_number,
+                                    proposed_window_size,
+                                    segment_payload,
+                                    apdu_info.more_follows,
+                                    source_addr,
+                                    first_segment_info,
+                                ) {
+                                    Ok(Some((complete_apdu, original_npdu))) => {
+                                        // Reassembly complete - forward to MS/TP
+                                        // Parse original NPDU to get routing info
+                                        let (orig_npdu_info, orig_npdu_len) = parse_npdu(&original_npdu)?;
+
+                                        // Determine MS/TP destination
+                                        let mstp_dest = if let Some(ref dest) = orig_npdu_info.destination {
+                                            if dest.network == self.mstp_network {
+                                                if dest.address.is_empty() { 255 } else { dest.address[0] }
+                                            } else if dest.network == 0xFFFF {
+                                                255
+                                            } else {
+                                                255
+                                            }
+                                        } else {
+                                            255
+                                        };
+
+                                        // Build new NPDU with reassembled APDU
+                                        // Create a synthetic "original data" with our complete APDU
+                                        let mut synthetic_npdu = original_npdu[..orig_npdu_len].to_vec();
+                                        synthetic_npdu.extend_from_slice(&complete_apdu);
+
+                                        let final_delivery = orig_npdu_info.destination
+                                            .as_ref()
+                                            .map(|d| d.network == self.mstp_network || d.network == 0xFFFF)
+                                            .unwrap_or(true);
+
+                                        let routed_npdu = build_routed_npdu(
+                                            &synthetic_npdu,
+                                            self.ip_network,
+                                            &ip_to_mac(&source_addr),
+                                            &orig_npdu_info,
+                                            final_delivery,
+                                        )?;
+
+                                        // Create transaction for the reassembled request
+                                        if let Ok(service) = ConfirmedServiceChoice::try_from(complete_apdu[3]) {
+                                            let transaction = PendingTransaction::new(
+                                                invoke_id,
+                                                source_addr,
+                                                orig_npdu_info.source.as_ref().map(|s| s.network),
+                                                orig_npdu_info.source.as_ref().map(|s| s.address.clone()).unwrap_or_default(),
+                                                self.mstp_network,
+                                                mstp_dest,
+                                                service,
+                                                true, // Segmented request
+                                            );
+                                            if let Err(e) = self.transactions.add(transaction) {
+                                                debug!("Failed to create transaction for reassembled request: {}", e);
+                                            }
+                                        }
+
+                                        self.stats.ip_to_mstp_packets += 1;
+                                        self.stats.last_activity = Some(Instant::now());
+
+                                        info!(
+                                            "Forwarding reassembled APDU to MS/TP: invoke_id={} dest={} len={}",
+                                            invoke_id, mstp_dest, routed_npdu.len()
+                                        );
+
+                                        return Ok(Some((routed_npdu, mstp_dest)));
+                                    }
+                                    Ok(None) => {
+                                        // More segments needed - SegmentAck was sent
+                                        return Ok(None);
+                                    }
+                                    Err(e) => {
+                                        warn!("Segment processing failed: {:?}", e);
+                                        return Err(e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Create transaction for confirmed requests (non-segmented)
+                    if apdu_info.apdu_type == ApduTypeClass::ConfirmedRequest && !apdu_info.segmented {
+                        if let (Some(invoke_id), Some(service_raw)) = (apdu_info.invoke_id, apdu_info.service) {
+                            // Determine destination MS/TP address early (needed for transaction key)
+                            let dest_mac = if let Some(ref dest) = npdu.destination {
+                                if dest.network == self.mstp_network {
+                                    if dest.address.is_empty() { 255 } else { dest.address[0] }
+                                } else if dest.network == 0xFFFF {
+                                    255 // Global broadcast
+                                } else {
+                                    255 // Unknown network - will be rejected later
+                                }
+                            } else {
+                                255 // No destination - local broadcast
+                            };
+
+                            // Convert service code to ConfirmedServiceChoice
+                            if let Ok(service) = ConfirmedServiceChoice::try_from(service_raw) {
+                                let transaction = PendingTransaction::new(
+                                    invoke_id,
+                                    source_addr,
+                                    npdu.source.as_ref().map(|s| s.network),
+                                    npdu.source.as_ref().map(|s| s.address.clone()).unwrap_or_default(),
+                                    self.mstp_network,
+                                    dest_mac,
+                                    service,
+                                    false, // Non-segmented
+                                );
+
+                                if let Err(e) = self.transactions.add(transaction) {
+                                    debug!("Failed to create transaction for invoke_id={}: {}", invoke_id, e);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Log but don't fail - still route the packet
+                    trace!("Could not parse APDU for transaction tracking: {:?}", e);
+                }
+            }
         }
 
         // Determine MS/TP destination and whether this is final delivery
@@ -1115,6 +1692,206 @@ impl std::fmt::Display for GatewayError {
 }
 
 impl std::error::Error for GatewayError {}
+
+/// APDU type classification for transaction tracking
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApduTypeClass {
+    ConfirmedRequest,
+    UnconfirmedRequest,
+    SimpleAck,
+    ComplexAck,
+    SegmentAck,
+    Error,
+    Reject,
+    Abort,
+}
+
+/// Parsed APDU information for transaction tracking
+///
+/// Extracts key fields needed to track confirmed service transactions:
+/// - Invoke ID for request/response correlation
+/// - Service type for timeout configuration
+/// - Segmentation flags for buffer management
+#[derive(Debug, Clone)]
+pub struct ApduInfo {
+    pub apdu_type: ApduTypeClass,
+    pub invoke_id: Option<u8>,
+    pub service: Option<u8>,
+    pub segmented: bool,
+    pub more_follows: bool,
+    pub segmented_response_accepted: bool,
+}
+
+impl ApduInfo {
+    /// Check if this APDU is a response type (SimpleAck, ComplexAck, Error, Reject, Abort)
+    pub fn is_response(&self) -> bool {
+        matches!(
+            self.apdu_type,
+            ApduTypeClass::SimpleAck
+                | ApduTypeClass::ComplexAck
+                | ApduTypeClass::SegmentAck
+                | ApduTypeClass::Error
+                | ApduTypeClass::Reject
+                | ApduTypeClass::Abort
+        )
+    }
+
+    /// Check if this APDU requires transaction tracking (confirmed request or response)
+    pub fn needs_tracking(&self) -> bool {
+        matches!(
+            self.apdu_type,
+            ApduTypeClass::ConfirmedRequest
+                | ApduTypeClass::SimpleAck
+                | ApduTypeClass::ComplexAck
+                | ApduTypeClass::Error
+                | ApduTypeClass::Reject
+                | ApduTypeClass::Abort
+        )
+    }
+}
+
+/// Parse APDU header from data (after NPDU header)
+///
+/// Returns ApduInfo with invoke_id, service type, and segmentation flags.
+/// The data should start at the APDU (after NPDU header).
+fn parse_apdu(data: &[u8]) -> Result<ApduInfo, GatewayError> {
+    if data.is_empty() {
+        return Err(GatewayError::InvalidFrame);
+    }
+
+    let pdu_type_byte = data[0];
+    let pdu_type_raw = (pdu_type_byte >> 4) & 0x0F;
+
+    let apdu_type = match pdu_type_raw {
+        0 => ApduTypeClass::ConfirmedRequest,
+        1 => ApduTypeClass::UnconfirmedRequest,
+        2 => ApduTypeClass::SimpleAck,
+        3 => ApduTypeClass::ComplexAck,
+        4 => ApduTypeClass::SegmentAck,
+        5 => ApduTypeClass::Error,
+        6 => ApduTypeClass::Reject,
+        7 => ApduTypeClass::Abort,
+        _ => return Err(GatewayError::InvalidFrame),
+    };
+
+    match apdu_type {
+        ApduTypeClass::ConfirmedRequest => {
+            if data.len() < 4 {
+                return Err(GatewayError::InvalidFrame);
+            }
+
+            let segmented = (pdu_type_byte & 0x08) != 0;
+            let more_follows = (pdu_type_byte & 0x04) != 0;
+            let segmented_response_accepted = (pdu_type_byte & 0x02) != 0;
+
+            let invoke_id = data[2];
+            let service_pos = if segmented { 5 } else { 3 };
+
+            let service = if data.len() > service_pos {
+                Some(data[service_pos])
+            } else {
+                None
+            };
+
+            Ok(ApduInfo {
+                apdu_type,
+                invoke_id: Some(invoke_id),
+                service,
+                segmented,
+                more_follows,
+                segmented_response_accepted,
+            })
+        }
+
+        ApduTypeClass::UnconfirmedRequest => Ok(ApduInfo {
+            apdu_type,
+            invoke_id: None,
+            service: if data.len() > 1 { Some(data[1]) } else { None },
+            segmented: false,
+            more_follows: false,
+            segmented_response_accepted: false,
+        }),
+
+        ApduTypeClass::SimpleAck => {
+            if data.len() < 3 {
+                return Err(GatewayError::InvalidFrame);
+            }
+
+            Ok(ApduInfo {
+                apdu_type,
+                invoke_id: Some(data[1]),
+                service: Some(data[2]),
+                segmented: false,
+                more_follows: false,
+                segmented_response_accepted: false,
+            })
+        }
+
+        ApduTypeClass::ComplexAck => {
+            if data.len() < 3 {
+                return Err(GatewayError::InvalidFrame);
+            }
+
+            let segmented = (pdu_type_byte & 0x08) != 0;
+            let more_follows = (pdu_type_byte & 0x04) != 0;
+
+            let invoke_id = data[1];
+            let service_pos = if segmented { 4 } else { 2 };
+
+            let service = if data.len() > service_pos {
+                Some(data[service_pos])
+            } else {
+                None
+            };
+
+            Ok(ApduInfo {
+                apdu_type,
+                invoke_id: Some(invoke_id),
+                service,
+                segmented,
+                more_follows,
+                segmented_response_accepted: false,
+            })
+        }
+
+        ApduTypeClass::SegmentAck => {
+            if data.len() < 2 {
+                return Err(GatewayError::InvalidFrame);
+            }
+
+            Ok(ApduInfo {
+                apdu_type,
+                invoke_id: Some(data[1]),
+                service: None,
+                segmented: false,
+                more_follows: false,
+                segmented_response_accepted: false,
+            })
+        }
+
+        ApduTypeClass::Error | ApduTypeClass::Reject | ApduTypeClass::Abort => {
+            if data.len() < 2 {
+                return Err(GatewayError::InvalidFrame);
+            }
+
+            let invoke_id = data[1];
+            let service = if apdu_type == ApduTypeClass::Error && data.len() > 2 {
+                Some(data[2])
+            } else {
+                None
+            };
+
+            Ok(ApduInfo {
+                apdu_type,
+                invoke_id: Some(invoke_id),
+                service,
+                segmented: false,
+                more_follows: false,
+                segmented_response_accepted: false,
+            })
+        }
+    }
+}
 
 /// Parsed NPDU information
 #[allow(dead_code)]

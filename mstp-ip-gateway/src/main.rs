@@ -35,6 +35,7 @@ mod display;
 mod gateway;
 mod local_device;
 mod mstp_driver;
+mod transaction;
 mod web;
 
 use config::GatewayConfig;
@@ -427,6 +428,18 @@ fn main() -> anyhow::Result<()> {
         // Process any pending gateway tasks (non-blocking)
         if let Ok(mut gw) = gateway.try_lock() {
             gw.process_housekeeping();
+
+            // Check transaction timeouts every 100 iterations (1 second at 10ms/iteration)
+            if loop_count % 100 == 0 {
+                let timeout_count = gw.process_transaction_timeouts();
+                if timeout_count > 0 {
+                    info!(
+                        "Transaction timeouts: {} aborted, {} active",
+                        timeout_count,
+                        gw.active_transaction_count()
+                    );
+                }
+            }
         }
 
         // Check if Who-Is scan was requested from web portal (non-blocking)
@@ -1287,8 +1300,15 @@ fn ip_receive_task(
           gateway_mac, ip_network, mstp_network);
 
     let mut buffer = [0u8; 1500];
+    let mut poll_count: u32 = 0;
 
     loop {
+        poll_count += 1;
+        // Log heartbeat every 1000 polls (~10 seconds at 100ms timeout)
+        if poll_count % 1000 == 0 {
+            info!("BIP thread alive: {} polls, waiting for UDP on port 47808", poll_count);
+        }
+
         match socket.recv_from(&mut buffer) {
             Ok((len, source_addr)) => {
                 let data = &buffer[..len];
@@ -1296,6 +1316,18 @@ fn ip_receive_task(
                 // Log ALL received IP packets for debugging
                 info!("BIP RX: {} bytes from {} BVLC: {:02X?}",
                       len, source_addr, &data[..data.len().min(20)]);
+
+                // Debug: Log NPDU destination for routing decisions
+                if len > 8 {
+                    let npdu_start = if data[1] == 0x04 { 10 } else { 4 };  // Forwarded or Original
+                    if len > npdu_start + 4 {
+                        let control = data[npdu_start + 1];
+                        if (control & 0x20) != 0 {  // DNET present
+                            let dnet = ((data[npdu_start + 2] as u16) << 8) | (data[npdu_start + 3] as u16);
+                            info!("BIP RX DNET: {} (mstp_network={})", dnet, mstp_network);
+                        }
+                    }
+                }
 
                 // Try to process with local device first (for Who-Is from IP side)
                 // Also check for requests addressed to gateway via MS/TP routing (DNET=mstp_network, DADR=gateway_mac)
@@ -1332,7 +1364,9 @@ fn ip_receive_task(
                 }
 
                 // Route the frame through the gateway
+                info!("BIP->routing: calling gateway.lock()...");
                 if let Ok(mut gw) = gateway.lock() {
+                    info!("BIP->routing: calling route_from_ip...");
                     match gw.route_from_ip(data, source_addr) {
                         Ok(Some((mstp_data, mstp_dest))) => {
                             // Check NPDU control byte for expecting-reply bit (bit 2 = 0x04)
@@ -1356,12 +1390,14 @@ fn ip_receive_task(
                         }
                         Ok(None) => {
                             // Frame handled internally (e.g., BVLC control) or not for MS/TP
-                            info!("IP frame not routed to MS/TP (handled internally or not for MS/TP network)");
+                            info!("BIP->routing: route_from_ip returned None (BVLC control or not for MS/TP)");
                         }
                         Err(e) => {
-                            warn!("Failed to route IP frame: {}", e);
+                            warn!("BIP->routing: route_from_ip error: {}", e);
                         }
                     }
+                } else {
+                    warn!("BIP->routing: gateway.lock() failed!");
                 }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
